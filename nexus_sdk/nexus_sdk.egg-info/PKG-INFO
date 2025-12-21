@@ -1,0 +1,8 @@
+Metadata-Version: 2.1
+Name: nexus-sdk
+Version: 0.1.0
+Summary: Standard SDK for Nexus Tool Services
+Author: Nexus Team
+Requires-Python: >=3.8
+Requires-Dist: aio-pika>=9.0.0
+Requires-Dist: pydantic>=2.0.0

@@ -1,0 +1,267 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Literature Download Service",
+    "description": "异步文献下载服务，支持从 arXiv、PubMed、DOI 等来源下载学术文献 PDF",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://host.docker.internal:8000",
+      "description": "Docker Desktop 环境（推荐：Dify 容器访问宿主机上的服务）"
+    },
+    {
+      "url": "http://localhost:8000",
+      "description": "本地开发环境（仅当 Dify 也在本机运行时使用）"
+    },
+    {
+      "url": "http://download_service-app-1:8000",
+      "description": "Docker 网络内部（如果 Dify 和本服务在同一 Docker 网络）"
+    },
+    {
+      "url": "http://YOUR_SERVER_IP:8000",
+      "description": "远程服务器（替换为实际 IP 地址，如 192.168.1.100:8000）"
+    },
+    {
+      "url": "https://your-domain.com",
+      "description": "生产环境（使用域名和 HTTPS）"
+    }
+  ],
+  "paths": {
+    "/download": {
+      "post": {
+        "summary": "创建下载任务",
+        "description": "提交一个新的文献下载任务，返回任务 ID 用于后续查询",
+        "operationId": "createDownloadTask",
+        "tags": ["download"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DownloadRequest"
+              },
+              "example": {
+                "url": "https://arxiv.org/pdf/2301.00001.pdf"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "任务创建成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DownloadResponse"
+                },
+                "example": {
+                  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+                  "status": "pending"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数无效"
+          }
+        }
+      }
+    },
+    "/download/{task_id}": {
+      "get": {
+        "summary": "查询任务状态",
+        "description": "根据任务 ID 查询下载任务的当前状态和结果",
+        "operationId": "getTaskStatus",
+        "tags": ["download"],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "description": "任务的唯一标识符（UUID）",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "example": "550e8400-e29b-41d4-a716-446655440000"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功返回任务状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskStatusResponse"
+                },
+                "examples": {
+                  "pending": {
+                    "summary": "任务等待中",
+                    "value": {
+                      "task_id": "550e8400-e29b-41d4-a716-446655440000",
+                      "status": "pending",
+                      "file_url": null,
+                      "error_message": null,
+                      "created_at": "2024-01-01T10:00:00Z",
+                      "updated_at": "2024-01-01T10:00:00Z"
+                    }
+                  },
+                  "success": {
+                    "summary": "任务完成",
+                    "value": {
+                      "task_id": "550e8400-e29b-41d4-a716-446655440000",
+                      "status": "success",
+                      "file_url": "http://minio:9000/papers/file.pdf?X-Amz-Expires=3600",
+                      "error_message": null,
+                      "created_at": "2024-01-01T10:00:00Z",
+                      "updated_at": "2024-01-01T10:05:00Z"
+                    }
+                  },
+                  "failed": {
+                    "summary": "任务失败",
+                    "value": {
+                      "task_id": "550e8400-e29b-41d4-a716-446655440000",
+                      "status": "failed",
+                      "file_url": null,
+                      "error_message": "Failed to download: Connection timeout",
+                      "created_at": "2024-01-01T10:00:00Z",
+                      "updated_at": "2024-01-01T10:03:00Z"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "任务不存在"
+          },
+          "422": {
+            "description": "任务 ID 格式无效"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "健康检查",
+        "description": "检查服务及其依赖组件的健康状态",
+        "operationId": "healthCheck",
+        "tags": ["health"],
+        "responses": {
+          "200": {
+            "description": "服务健康",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                },
+                "example": {
+                  "status": "healthy",
+                  "components": {
+                    "database": "ok",
+                    "redis": "ok",
+                    "storage": "ok"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "DownloadRequest": {
+        "type": "object",
+        "required": ["url"],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "要下载的 PDF 文件 URL",
+            "example": "https://arxiv.org/pdf/2301.00001.pdf"
+          }
+        }
+      },
+      "DownloadResponse": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "任务的唯一标识符"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "processing", "success", "failed"],
+            "description": "任务当前状态"
+          }
+        }
+      },
+      "TaskStatusResponse": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "任务的唯一标识符"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "processing", "success", "failed"],
+            "description": "任务当前状态"
+          },
+          "file_url": {
+            "type": "string",
+            "format": "uri",
+            "nullable": true,
+            "description": "文件下载的预签名 URL（仅在成功时返回，1小时有效期）"
+          },
+          "error_message": {
+            "type": "string",
+            "nullable": true,
+            "description": "错误信息（仅在失败时返回）"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "任务创建时间"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "任务最后更新时间"
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "整体健康状态"
+          },
+          "components": {
+            "type": "object",
+            "properties": {
+              "database": {
+                "type": "string",
+                "description": "数据库状态"
+              },
+              "redis": {
+                "type": "string",
+                "description": "Redis 状态"
+              },
+              "storage": {
+                "type": "string",
+                "description": "存储服务状态"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

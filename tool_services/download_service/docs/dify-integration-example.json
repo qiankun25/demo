@@ -1,0 +1,246 @@
+{
+  "workflow": {
+    "name": "文献下载与分析工作流",
+    "description": "从外部源下载文献并进行 AI 分析",
+    "version": "1.0.0",
+    "nodes": [
+      {
+        "id": "start",
+        "type": "start",
+        "title": "开始",
+        "outputs": {
+          "paper_url": {
+            "type": "string",
+            "description": "文献 URL"
+          },
+          "source_type": {
+            "type": "string",
+            "description": "来源类型：arxiv, pubmed, doi, direct"
+          },
+          "title": {
+            "type": "string",
+            "description": "文献标题（可选）"
+          },
+          "authors": {
+            "type": "string",
+            "description": "作者（可选）"
+          }
+        }
+      },
+      {
+        "id": "download_request",
+        "type": "http-request",
+        "title": "创建下载任务",
+        "config": {
+          "method": "POST",
+          "url": "http://literature-download-service:8000/api/v1/download",
+          "headers": {
+            "Content-Type": "application/json",
+            "X-API-Key": "{{env.LITERATURE_API_KEY}}"
+          },
+          "body": {
+            "url": "{{start.paper_url}}",
+            "source_type": "{{start.source_type}}",
+            "metadata": {
+              "title": "{{start.title}}",
+              "authors": "{{start.authors}}",
+              "requested_by": "dify_workflow",
+              "workflow_id": "{{workflow.id}}"
+            }
+          },
+          "timeout": 30
+        },
+        "outputs": {
+          "task_id": "{{response.task_id}}",
+          "status": "{{response.status}}"
+        }
+      },
+      {
+        "id": "wait_initial",
+        "type": "delay",
+        "title": "等待处理",
+        "config": {
+          "seconds": 3
+        }
+      },
+      {
+        "id": "check_status",
+        "type": "http-request",
+        "title": "检查下载状态",
+        "config": {
+          "method": "GET",
+          "url": "http://literature-download-service:8000/api/v1/download/{{download_request.task_id}}",
+          "headers": {
+            "X-API-Key": "{{env.LITERATURE_API_KEY}}"
+          },
+          "timeout": 10
+        },
+        "outputs": {
+          "status": "{{response.status}}",
+          "file_url": "{{response.file_url}}",
+          "file_path": "{{response.file_path}}",
+          "error": "{{response.error}}",
+          "progress": "{{response.progress}}"
+        }
+      },
+      {
+        "id": "status_check",
+        "type": "if-else",
+        "title": "判断状态",
+        "config": {
+          "conditions": [
+            {
+              "condition": "{{check_status.status}} == 'completed'",
+              "next": "download_file"
+            },
+            {
+              "condition": "{{check_status.status}} == 'failed'",
+              "next": "handle_error"
+            },
+            {
+              "condition": "{{check_status.status}} in ['pending', 'processing']",
+              "next": "wait_retry"
+            }
+          ],
+          "default": "handle_error"
+        }
+      },
+      {
+        "id": "wait_retry",
+        "type": "delay",
+        "title": "等待重试",
+        "config": {
+          "seconds": 5
+        },
+        "next": "check_status"
+      },
+      {
+        "id": "download_file",
+        "type": "http-request",
+        "title": "下载文件内容",
+        "config": {
+          "method": "GET",
+          "url": "{{check_status.file_url}}",
+          "timeout": 60,
+          "response_type": "binary"
+        },
+        "outputs": {
+          "file_content": "{{response.body}}",
+          "content_type": "{{response.headers.content-type}}"
+        }
+      },
+      {
+        "id": "extract_text",
+        "type": "code",
+        "title": "提取文本内容",
+        "config": {
+          "language": "python",
+          "code": "import PyPDF2\nimport io\n\ndef main(file_content):\n    # 从 PDF 提取文本\n    pdf_file = io.BytesIO(file_content)\n    pdf_reader = PyPDF2.PdfReader(pdf_file)\n    \n    text = ''\n    for page in pdf_reader.pages:\n        text += page.extract_text()\n    \n    return {\n        'text': text,\n        'page_count': len(pdf_reader.pages)\n    }"
+        },
+        "inputs": {
+          "file_content": "{{download_file.file_content}}"
+        },
+        "outputs": {
+          "text": "{{result.text}}",
+          "page_count": "{{result.page_count}}"
+        }
+      },
+      {
+        "id": "analyze_paper",
+        "type": "llm",
+        "title": "分析文献",
+        "config": {
+          "model": "gpt-4",
+          "prompt": "请分析以下学术文献，提供以下信息：\n\n1. 研究主题和目标\n2. 主要方法\n3. 关键发现\n4. 结论和意义\n5. 局限性\n\n文献内容：\n{{extract_text.text}}",
+          "temperature": 0.3,
+          "max_tokens": 2000
+        },
+        "outputs": {
+          "analysis": "{{response.text}}"
+        }
+      },
+      {
+        "id": "summarize",
+        "type": "llm",
+        "title": "生成摘要",
+        "config": {
+          "model": "gpt-3.5-turbo",
+          "prompt": "基于以下分析，生成一个简洁的中文摘要（200字以内）：\n\n{{analyze_paper.analysis}}",
+          "temperature": 0.5,
+          "max_tokens": 500
+        },
+        "outputs": {
+          "summary": "{{response.text}}"
+        }
+      },
+      {
+        "id": "handle_error",
+        "type": "code",
+        "title": "处理错误",
+        "config": {
+          "language": "python",
+          "code": "def main(error, status):\n    return {\n        'success': False,\n        'error_message': f'下载失败：{error}',\n        'status': status\n    }"
+        },
+        "inputs": {
+          "error": "{{check_status.error}}",
+          "status": "{{check_status.status}}"
+        }
+      },
+      {
+        "id": "end",
+        "type": "end",
+        "title": "结束",
+        "outputs": {
+          "success": true,
+          "task_id": "{{download_request.task_id}}",
+          "file_url": "{{check_status.file_url}}",
+          "analysis": "{{analyze_paper.analysis}}",
+          "summary": "{{summarize.summary}}",
+          "page_count": "{{extract_text.page_count}}"
+        }
+      }
+    ],
+    "edges": [
+      { "from": "start", "to": "download_request" },
+      { "from": "download_request", "to": "wait_initial" },
+      { "from": "wait_initial", "to": "check_status" },
+      { "from": "check_status", "to": "status_check" },
+      {
+        "from": "status_check",
+        "to": "download_file",
+        "condition": "completed"
+      },
+      { "from": "status_check", "to": "handle_error", "condition": "failed" },
+      { "from": "status_check", "to": "wait_retry", "condition": "processing" },
+      { "from": "wait_retry", "to": "check_status" },
+      { "from": "download_file", "to": "extract_text" },
+      { "from": "extract_text", "to": "analyze_paper" },
+      { "from": "analyze_paper", "to": "summarize" },
+      { "from": "summarize", "to": "end" },
+      { "from": "handle_error", "to": "end" }
+    ]
+  },
+  "environment_variables": {
+    "LITERATURE_API_KEY": {
+      "description": "文献下载服务的 API Key",
+      "required": true,
+      "type": "secret"
+    }
+  },
+  "usage_example": {
+    "input": {
+      "paper_url": "https://arxiv.org/pdf/2301.00001.pdf",
+      "source_type": "arxiv",
+      "title": "Attention Is All You Need",
+      "authors": "Vaswani et al."
+    },
+    "expected_output": {
+      "success": true,
+      "task_id": "uuid-here",
+      "file_url": "http://minio:9000/papers/file.pdf",
+      "analysis": "详细分析内容...",
+      "summary": "简短摘要...",
+      "page_count": 15
+    }
+  }
+}

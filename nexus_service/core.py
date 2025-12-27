@@ -471,11 +471,18 @@ class NexusService:
                 ctx = await self._ctx_update(trace_id, discovery_key=discovery_out_key)
 
                 discovery_payload = await MockStorage.get(discovery_out_key)
+                print(f"[DEBUG] Discovery Payload Keys: {discovery_payload.keys() if isinstance(discovery_payload, dict) else 'Not Dict'}")
+                if isinstance(discovery_payload, dict):
+                    res = discovery_payload.get("results")
+                    print(f"[DEBUG] Discovery Results Type: {type(res)}, Length: {len(res) if isinstance(res, list) else 'N/A'}")
+
                 if not isinstance(discovery_payload, dict):
+                    print(f"[ERROR] Invalid payload type: {type(discovery_payload)}")
                     raise RuntimeError("discovery payload invalid")
 
                 results = discovery_payload.get("results") or []
                 if not isinstance(results, list):
+                    print(f"[ERROR] Invalid results type: {type(results)}")
                     raise RuntimeError("discovery results invalid")
 
                 requested_limit = int(ctx.get("requested_limit", 5))

@@ -26,8 +26,10 @@ def _ensure_download_service_on_path() -> None:
     这样 `from app...`（download_service 内部包）可以被导入。
     """
     download_service_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    if os.path.exists(download_service_root) and download_service_root not in sys.path:
-        sys.path.append(download_service_root)
+    if os.path.exists(download_service_root):
+        if download_service_root in sys.path:
+            sys.path.remove(download_service_root)
+        sys.path.insert(0, download_service_root)
 
 
 _ensure_nexus_sdk_on_path()

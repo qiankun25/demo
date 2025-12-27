@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=https://json-schema.org/draft-07/schema
+workflows:
+  - name: "Morning Report Workflow"
+    task_type: "MORNING_REPORT"
+    initial_stage: "discovery"
+    stages:
+      - name: "discovery"
+        stage_type: "single"
+        command_routing_key: "cmd.discovery.start"
+        success_event: "evt.discovery.finished"
+        failure_event: "evt.discovery.failed"
+        next_stage: "downloader"
+        
+      - name: "downloader"
+        stage_type: "fan_out"
+        command_routing_key: "cmd.downloader.start"
+        success_event: "evt.downloader.finished"
+        failure_event: "evt.downloader.failed"
+        next_stage: "parser"
+        filter_function: "work_has_pdf_candidate"
+        
+      - name: "parser"
+        stage_type: "single"
+        command_routing_key: "cmd.parser.start"
+        success_event: "evt.parser.finished"
+        failure_event: "evt.parser.failed"
+        next_stage: "indexer"
+        
+      - name: "indexer"
+        stage_type: "single"
+        command_routing_key: "cmd.indexer.start"
+        success_event: "evt.indexer.finished"
+        failure_event: "evt.indexer.failed"
+        next_stage: null
+
+  - name: "Summary Report Workflow"
+    task_type: "SUMMARY_REPORT"
+    initial_stage: "parser"
+    stages:
+      - name: "parser"
+        stage_type: "single"
+        command_routing_key: "cmd.parser.start"
+        success_event: "evt.parser.finished"
+        failure_event: "evt.parser.failed"
+        next_stage: "overview"
+        
+      - name: "overview"
+        stage_type: "fan_in"
+        command_routing_key: "cmd.overview.start"
+        success_event: "evt.overview.finished"
+        failure_event: "evt.overview.failed"
+        next_stage: null

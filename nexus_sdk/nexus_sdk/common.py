@@ -18,7 +18,7 @@ except Exception:  # pragma: no cover
 # --- 1. RabbitMQ 配置 ---
 class RabbitConfig:
     # 假设 demo 使用本地默认配置。生产环境请使用环境变量。
-    URL = "amqp://guest:guest@localhost:5672/"
+    URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
     
     # 交换机定义
     CMD_EXCHANGE = "nexus.cmd.exchange"   # 指令交换机 (Direct)

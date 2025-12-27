@@ -285,6 +285,9 @@ class KnowledgeBaseOverviewResponse(BaseModel):
     docs: List[OverviewDoc]
 
 
+import asyncio
+from nexus_tool.tool_service import IndexerToolService
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     conn = _connect()
@@ -292,17 +295,35 @@ async def lifespan(app: FastAPI):
     app.state.db = conn
 
     # Chroma persistent client + collection
-    os.makedirs(settings.chroma_persist_dir, exist_ok=True)
-    chroma_client = chromadb.PersistentClient(path=settings.chroma_persist_dir)
+    # Align with IndexerToolService defaults
+    persist_dir = os.getenv("CHROMA_PERSIST_DIR", ".chroma")
+    collection_name = os.getenv("CHROMA_COLLECTION", "morning_report")
+    
+    os.makedirs(persist_dir, exist_ok=True)
+    chroma_client = chromadb.PersistentClient(path=persist_dir)
     # Ensure collection exists with desired metric
     collection = chroma_client.get_or_create_collection(
-        name=settings.chroma_collection,
+        name=collection_name,
         metadata={"hnsw:space": settings.chroma_distance},
     )
     app.state.chroma_client = chroma_client
     app.state.chroma_collection = collection
 
+    # Start the Worker in background
+    print("[Indexing Service] Starting RabbitMQ Worker...")
+    service = IndexerToolService()
+    worker_task = asyncio.create_task(service.start())
+
     yield
+    
+    # Cleanup
+    print("[Indexing Service] Stopping RabbitMQ Worker...")
+    worker_task.cancel()
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        pass
+        
     conn.close()
 
 

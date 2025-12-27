@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from app.models.api_models import (
     JobSubmitRequest, 
     JobSubmitResponse, 
@@ -54,6 +55,35 @@ async def get_job_status(
             detail=f"Job {trace_id} not found"
         )
     return response
+
+@router.get(
+    "/jobs/{trace_id}/artifacts/{artifact_key}",
+    response_class=StreamingResponse
+)
+async def get_job_artifact(
+    trace_id: str,
+    artifact_key: str,
+    service: StatusService = Depends(get_status_service)
+):
+    try:
+        # Verify artifact exists and belongs to job
+        artifact_stream, content_type = await service.get_artifact_stream(trace_id, artifact_key)
+        
+        return StreamingResponse(
+            artifact_stream,
+            media_type=content_type
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve artifact: {str(e)}"
+        )
+
 
 @router.get("/health")
 async def health_check(

@@ -34,5 +34,5 @@ class JobStatusResponse(BaseModel):
     completed_count: int
     failed_count: int
     pending_count: int
-    report_key: Optional[str] = None
+    artifacts: Dict[str, str] = Field(default_factory=dict, description="Map of artifact keys to download URLs")
     failures: List[Dict[str, Any]] = Field(default_factory=list)

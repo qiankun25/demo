@@ -25,6 +25,26 @@ class StatusService:
             completed_count=completed,
             failed_count=failed,
             pending_count=pending,
-            report_key=context.report_key,
+            artifacts={
+                k: f"/api/v1/jobs/{context.trace_id}/artifacts/{k}" 
+                for k, v in context.artifacts.items()
+            },
             failures=[f.model_dump() for f in context.failures]
         )
+
+    async def get_artifact_stream(self, trace_id: str, artifact_key: str):
+        """Get artifact stream for a specific job"""
+        # 1. Get job context to verify artifact belongs to job
+        context = await self.orchestrator.get_job_status(trace_id)
+        if not context:
+            raise ValueError(f"Job {trace_id} not found")
+            
+        # 2. Check if artifact key exists in job's artifacts
+        if artifact_key not in context.artifacts:
+            raise ValueError(f"Artifact {artifact_key} not found in job {trace_id}")
+            
+        # 3. Get actual storage key
+        storage_key = context.artifacts[artifact_key]
+        
+        # 4. Get stream from storage
+        return await self.orchestrator.storage.get_stream(storage_key)

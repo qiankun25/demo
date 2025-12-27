@@ -23,6 +23,11 @@ class StorageBackend(ABC):
         pass
 
     @abstractmethod
+    async def get_stream(self, key: str) -> tuple[Any, str]:
+        """Retrieve data stream and content type from storage"""
+        pass
+
+    @abstractmethod
     async def put(self, key: str, data: Any) -> None:
         """Save data to storage"""
         pass
@@ -71,6 +76,45 @@ class MinIOStorage(StorageBackend):
     @with_retry()
     async def get(self, key: str) -> Any:
         return await asyncio.to_thread(self._get_sync, key)
+    
+    async def get_stream(self, key: str) -> tuple[Any, str]:
+        """Get object as a stream (generator) and its content type.
+        
+        Returns:
+            tuple: (generator, content_type)
+        """
+        # We don't use asyncio.to_thread here because we want to yield chunks
+        # But MinIO get_object returns a blocking response object.
+        # We need to run the initial request in thread, but the streaming part...
+        # Actually, MinIO response.stream() is blocking.
+        # So we should wrap the whole thing in a way that FastAPI can consume.
+        # A simple way is to get the response object and wrap its stream method.
+        
+        def _get_response_sync():
+            obj_name = self._get_object_name(key)
+            try:
+                # get_object returns a urllib3.response.HTTPResponse
+                response = self.client.get_object(self.bucket, obj_name)
+                # Determine content type (default to json if unknown)
+                content_type = response.headers.get("Content-Type", "application/json")
+                return response, content_type
+            except S3Error as e:
+                if e.code == "NoSuchKey":
+                    raise ValueError(f"Artifact {key} not found")
+                raise
+                
+        response, content_type = await asyncio.to_thread(_get_response_sync)
+        
+        async def _stream_generator():
+            try:
+                # Read in 32KB chunks
+                for chunk in response.stream(32 * 1024):
+                    yield chunk
+            finally:
+                response.close()
+                response.release_conn()
+                
+        return _stream_generator(), content_type
         
     def _unwrap(self, raw: bytes) -> Any:
         MAGIC = b"NEXUS_CLAIMCHECK_V1\n"

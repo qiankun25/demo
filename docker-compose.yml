@@ -1,0 +1,258 @@
+version: '3.8'
+
+services:
+  # --- Infrastructure ---
+  rabbitmq:
+    image: rabbitmq:3.9-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: downloads
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d downloads"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Core Services ---
+  nexus:
+    build:
+      context: ./nexus
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=papers
+      - WORKFLOW_CONFIG_PATH=config/workflows.yaml
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # --- Tool Services (Workers) ---
+  
+  discovery_service:
+    build:
+      context: .
+      dockerfile: tool_services/discovery_service/Dockerfile
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=papers
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # The actual Download Service API/Worker (Standalone)
+  download_service_api:
+    build:
+      context: ./tool_services/download_service
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8000"
+    environment:
+      - DATABASE_URL=postgresql://user:pass@db:5432/downloads
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_EXTERNAL_ENDPOINT=localhost:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=papers
+      - MINIO_SECURE=false
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  download_service_worker:
+    build:
+      context: ./tool_services/download_service
+      dockerfile: Dockerfile
+    command: celery -A app.celery_app worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://user:pass@db:5432/downloads
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_EXTERNAL_ENDPOINT=localhost:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=papers
+      - MINIO_SECURE=false
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # The Nexus Tool Adapter for Download Service
+  download_tool:
+    build:
+      context: .
+      dockerfile: tool_services/download_service/Dockerfile.tool
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=papers
+      # Provide DB/Redis config as it imports app code
+      - DATABASE_URL=postgresql://user:pass@db:5432/downloads
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+  indexing_service:
+    build:
+      context: .
+      dockerfile: tool_services/indexing_service/Dockerfile
+    ports:
+      - "8020:8020"
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=papers
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  overview_service:
+    build:
+      context: .
+      dockerfile: tool_services/overview_service/Dockerfile
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=papers
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # Paper Analyse Nexus Tool (Python Wrapper)
+  paper_analyse_tool:
+    build:
+      context: .
+      dockerfile: tool_services/paper_analyse/Dockerfile.tool
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=papers
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  retrieval_service:
+    build:
+      context: .
+      dockerfile: tool_services/retrieval_service/Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=papers
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  translator_service:
+    build:
+      context: .
+      dockerfile: tool_services/translator_service/Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=papers
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+volumes:
+  minio_data:
+  postgres_data:

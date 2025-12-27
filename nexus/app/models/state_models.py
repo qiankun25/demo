@@ -23,6 +23,6 @@ class JobContext(BaseModel):
     completed_work_keys: List[str] = Field(default_factory=list)
     failures: List[FailureRecord] = Field(default_factory=list)
     discovery_key: Optional[str] = None
-    report_key: Optional[str] = None
+    artifacts: Dict[str, str] = Field(default_factory=dict, description="Map of step names to storage keys")
     current_stage: str = "init"
     metadata: Dict[str, Any] = Field(default_factory=dict)

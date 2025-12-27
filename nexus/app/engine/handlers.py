@@ -64,10 +64,16 @@ class DiscoveryFinishedHandler:
             return
 
         # Update context
-        await self.state.update_context(context.trace_id, {
-            "work_keys": work_keys,
-            "current_stage": "processing"
-        })
+        def update_discovery_ctx(ctx: JobContext) -> Dict[str, Any]:
+            artifacts = ctx.artifacts.copy()
+            artifacts["search_results"] = payload.output_key
+            return {
+                "work_keys": work_keys,
+                "current_stage": "processing",
+                "artifacts": artifacts
+            }
+
+        await self.state.atomic_update_context(context.trace_id, update_discovery_ctx)
         
         # Publish commands
         for work, key in zip(valid_works, work_keys):
@@ -225,23 +231,48 @@ class IndexerFinishedHandler:
         
         if is_complete and updated_ctx.current_stage != "completed":
             
-            # Generate Report
+            # Generate Manifest instead of Report
             if context.task_type == "MORNING_REPORT":
-                from app.services.report_service import ReportService
-                report_service = ReportService(self.storage, self.state)
-                try:
-                    await report_service.build_morning_report(context.trace_id)
-                    logger.info(f"Generated MORNING_REPORT for {context.trace_id}")
-                except Exception as e:
-                    logger.error(f"Failed to generate report: {e}")
+                manifest = []
+                for wk in completed:
+                    # Reconstruct keys logic
+                    # This duplication of logic is not ideal, but acceptable for now to avoid complexity
+                    work_in_key = f"data:work:{wk}"
+                    download_out_key = f"data:download:{work_in_key}"
+                    parse_out_key = f"data:parse:{download_out_key}"
+                    index_out_key = f"data:index:{parse_out_key}"
+                    
+                    manifest.append({
+                        "work_key": wk,
+                        "download_key": download_out_key,
+                        "parse_key": parse_out_key,
+                        "index_key": index_out_key
+                    })
+                
+                manifest_key = f"data:manifest:{context.trace_id}"
+                await self.storage.put(manifest_key, manifest)
+                logger.info(f"Generated manifest for {context.trace_id}")
 
-            # Atomic update status
-            def update_status(ctx: JobContext) -> Dict[str, Any]:
-                if ctx.current_stage != "completed":
-                    return {"current_stage": "completed"}
-                return {}
+                # Atomic update status and artifacts
+                def update_status_and_artifacts(ctx: JobContext) -> Dict[str, Any]:
+                    updates = {}
+                    if ctx.current_stage != "completed":
+                        updates["current_stage"] = "completed"
+                    
+                    artifacts = ctx.artifacts.copy()
+                    artifacts["detailed_manifest"] = manifest_key
+                    updates["artifacts"] = artifacts
+                    return updates
             
-            await self.state.atomic_update_context(context.trace_id, update_status)
+                await self.state.atomic_update_context(context.trace_id, update_status_and_artifacts)
+            else:
+                # Default completion logic for other types
+                def update_status(ctx: JobContext) -> Dict[str, Any]:
+                    if ctx.current_stage != "completed":
+                        return {"current_stage": "completed"}
+                    return {}
+                await self.state.atomic_update_context(context.trace_id, update_status)
+
             JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
 
 class FailureHandler:
@@ -267,9 +298,10 @@ class FailureHandler:
         
         # Atomic update for failures
         def update_fn(ctx: JobContext) -> Dict[str, Any]:
-            failures = ctx.failures
-            failures.append(failure)
-            return {"failures": failures}
+            # Create new list to avoid side effects on cached context
+            new_failures = list(ctx.failures)
+            new_failures.append(failure)
+            return {"failures": new_failures}
             
         updated_ctx = await self.state.atomic_update_context(context.trace_id, update_fn)
 
@@ -311,21 +343,44 @@ class FailureHandler:
                         task_id=context.trace_id
                     )
             elif updated_ctx.current_stage != "completed":
-                # Generate Report for MORNING_REPORT even if failures occurred
+                # Generate Manifest for MORNING_REPORT even if failures occurred
                 if context.task_type == "MORNING_REPORT":
-                    from app.services.report_service import ReportService
-                    report_service = ReportService(self.storage, self.state)
-                    try:
-                        await report_service.build_morning_report(context.trace_id)
-                        logger.info(f"Generated MORNING_REPORT (with failures) for {context.trace_id}")
-                    except Exception as e:
-                        logger.error(f"Failed to generate report: {e}")
+                    manifest = []
+                    # Only include completed works in manifest
+                    for wk in completed:
+                        work_in_key = f"data:work:{wk}"
+                        download_out_key = f"data:download:{work_in_key}"
+                        parse_out_key = f"data:parse:{download_out_key}"
+                        index_out_key = f"data:index:{parse_out_key}"
+                        
+                        manifest.append({
+                            "work_key": wk,
+                            "download_key": download_out_key,
+                            "parse_key": parse_out_key,
+                            "index_key": index_out_key
+                        })
+                    
+                    manifest_key = f"data:manifest:{context.trace_id}"
+                    await self.storage.put(manifest_key, manifest)
 
-                # Atomic update status
-                def update_status(ctx: JobContext) -> Dict[str, Any]:
-                    if ctx.current_stage != "completed":
-                        return {"current_stage": "completed"}
-                    return {}
+                    def update_status_and_artifacts(ctx: JobContext) -> Dict[str, Any]:
+                        updates = {}
+                        if ctx.current_stage != "completed":
+                            updates["current_stage"] = "completed"
+                        
+                        artifacts = ctx.artifacts.copy()
+                        artifacts["detailed_manifest"] = manifest_key
+                        updates["artifacts"] = artifacts
+                        return updates
                 
-                await self.state.atomic_update_context(context.trace_id, update_status)
+                    await self.state.atomic_update_context(context.trace_id, update_status_and_artifacts)
+                else:
+                    # Atomic update status
+                    def update_status(ctx: JobContext) -> Dict[str, Any]:
+                        if ctx.current_stage != "completed":
+                            return {"current_stage": "completed"}
+                        return {}
+                    
+                    await self.state.atomic_update_context(context.trace_id, update_status)
+                
                 JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()

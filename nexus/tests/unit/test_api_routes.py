@@ -56,6 +56,25 @@ def test_get_status(client, mock_status_service):
     assert resp.status_code == 200
     assert resp.json()["status"] == "running"
 
+def test_get_artifact(client, mock_status_service):
+    async def mock_stream_gen():
+        yield b'{"test": "data"}'
+        
+    mock_status_service.get_artifact_stream.return_value = (mock_stream_gen(), "application/json")
+    
+    resp = client.get("/api/v1/jobs/t1/artifacts/search_res")
+    
+    assert resp.status_code == 200
+    assert resp.content == b'{"test": "data"}'
+    assert resp.headers["content-type"] == "application/json"
+
+def test_get_artifact_404_job(client, mock_status_service):
+    mock_status_service.get_artifact_stream.side_effect = ValueError("Job t1 not found")
+    
+    resp = client.get("/api/v1/jobs/t1/artifacts/search_res")
+    
+    assert resp.status_code == 404
+
 def test_get_status_404(client, mock_status_service):
     mock_status_service.get_job_status.return_value = None
     

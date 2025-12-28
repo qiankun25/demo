@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Protocol, List, Any, Dict, Optional
 from app.models.messages import MessagePackage, EventPayload
@@ -21,12 +22,58 @@ class DiscoveryFinishedHandler:
         self.state = state
         self.settings = get_settings()
 
+    async def _publish_single_download_command(
+        self, 
+        work: Dict[str, Any], 
+        work_key: str, 
+        trace_id: str
+    ) -> Dict[str, Any]:
+        """
+        Publish a single download command with error handling.
+        
+        Args:
+            work: Work item data
+            work_key: Generated work key
+            trace_id: Trace ID for the job
+            
+        Returns:
+            Dict with success status, work_key, and optional error message
+        """
+        try:
+            work_input_key = f"data:work:{work_key}"
+            
+            # Store work item data
+            await self.storage.put(work_input_key, {"work": work})
+            
+            # Publish download command
+            await self.mq.publish_command(
+                routing_key="cmd.downloader.start",
+                trace_id=trace_id,
+                task_type="downloader",
+                input_key=work_input_key,
+                task_id=work_key
+            )
+            
+            return {
+                "success": True,
+                "work_key": work_key
+            }
+        except Exception as e:
+            logger.error(
+                f"Failed to publish download command for work_key={work_key}, trace_id={trace_id}: {e}",
+                exc_info=True
+            )
+            return {
+                "success": False,
+                "work_key": work_key,
+                "error": str(e)
+            }
+
     async def handle(self, message: MessagePackage, context: JobContext) -> None:
         payload = EventPayload(**message.payload)
         
         if payload.status != "SUCCESS":
             logger.error(f"Discovery failed: {payload.error_msg}")
-            # Could trigger FailureHandler logic or just log
             return
 
         if not payload.output_key:
@@ -53,7 +100,6 @@ class DiscoveryFinishedHandler:
         for i, work in enumerate(results):
             if work_has_pdf_candidate(work):
                 valid_works.append(work)
-                # Generate key
                 key = generate_work_key(context.trace_id, i)
                 work_keys.append(key)
                 
@@ -75,18 +121,46 @@ class DiscoveryFinishedHandler:
 
         await self.state.atomic_update_context(context.trace_id, update_discovery_ctx)
         
-        # Publish commands
-        for work, key in zip(valid_works, work_keys):
-            work_input_key = f"data:work:{key}"
-            # Wrap work in a dict to match Tool Service expectation (and nexus_service/core.py)
-            await self.storage.put(work_input_key, {"work": work})
-            
-            await self.mq.publish_command(
-                routing_key="cmd.downloader.start",
-                trace_id=context.trace_id,
-                task_type="downloader",
-                input_key=work_input_key,
-                task_id=key
+        # Publish commands concurrently with error handling
+        logger.info(
+            f"Publishing {len(valid_works)} download commands for trace_id={context.trace_id}"
+        )
+        
+        tasks = [
+            self._publish_single_download_command(work, key, context.trace_id)
+            for work, key in zip(valid_works, work_keys)
+        ]
+        
+        # Execute all tasks concurrently, ensuring exceptions don't stop other tasks
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Analyze results
+        success_count = 0
+        failed_count = 0
+        failed_keys = []
+        
+        for result in results:
+            if isinstance(result, Exception):
+                # Unexpected exception from gather
+                failed_count += 1
+                logger.error(f"Unexpected exception in download command publishing: {result}")
+            elif isinstance(result, dict):
+                if result.get("success"):
+                    success_count += 1
+                else:
+                    failed_count += 1
+                    failed_keys.append(result.get("work_key"))
+        
+        # Log summary
+        logger.info(
+            f"Download command publishing completed for trace_id={context.trace_id}: "
+            f"{success_count} succeeded, {failed_count} failed"
+        )
+        
+        if failed_count > 0:
+            logger.warning(
+                f"Failed to publish download commands for work_keys: {failed_keys}, "
+                f"trace_id={context.trace_id}. These tasks will not be processed."
             )
 
 class DownloaderFinishedHandler:

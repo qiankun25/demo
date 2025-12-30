@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Protocol, List, Any, Dict, Optional
 from app.models.messages import MessagePackage, EventPayload
 from app.models.state_models import JobContext, FailureRecord
@@ -70,6 +71,7 @@ class DiscoveryFinishedHandler:
             }
 
     async def handle(self, message: MessagePackage, context: JobContext) -> None:
+        t0 = time.monotonic()
         payload = EventPayload(**message.payload)
         
         if payload.status != "SUCCESS":
@@ -107,6 +109,17 @@ class DiscoveryFinishedHandler:
             logger.info("No valid works found after discovery")
             await self.state.update_context(context.trace_id, {"current_stage": "completed"})
             JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
+            logger.info(
+                "stage.discovery.no_valid_works.completed",
+                extra={
+                    "trace_id": context.trace_id,
+                    "task_type": context.task_type,
+                    "discovery_output_key": payload.output_key,
+                    "results_count": len(results) if isinstance(results, list) else None,
+                    "valid_work_count": 0,
+                    "duration_ms": int((time.monotonic() - t0) * 1000),
+                },
+            )
             return
 
         # Update context
@@ -120,6 +133,18 @@ class DiscoveryFinishedHandler:
             }
 
         await self.state.atomic_update_context(context.trace_id, update_discovery_ctx)
+        logger.info(
+            "stage.discovery.done",
+            extra={
+                "trace_id": context.trace_id,
+                "task_type": context.task_type,
+                "discovery_output_key": payload.output_key,
+                "results_count": len(results) if isinstance(results, list) else None,
+                "valid_work_count": len(valid_works),
+                "work_keys_count": len(work_keys),
+                "duration_ms": int((time.monotonic() - t0) * 1000),
+            },
+        )
         
         # Publish commands concurrently with error handling
         logger.info(
@@ -162,12 +187,24 @@ class DiscoveryFinishedHandler:
                 f"Failed to publish download commands for work_keys: {failed_keys}, "
                 f"trace_id={context.trace_id}. These tasks will not be processed."
             )
+        logger.info(
+            "stage.downloader.fanout.published",
+            extra={
+                "trace_id": context.trace_id,
+                "task_type": context.task_type,
+                "published_total": len(valid_works),
+                "publish_succeeded": success_count,
+                "publish_failed": failed_count,
+                "duration_ms": int((time.monotonic() - t0) * 1000),
+            },
+        )
 
 class DownloaderFinishedHandler:
     def __init__(self, mq: MQManager):
         self.mq = mq
 
     async def handle(self, message: MessagePackage, context: JobContext) -> None:
+        t0 = time.monotonic()
         payload = EventPayload(**message.payload)
         if payload.status != "SUCCESS":
             return 
@@ -184,6 +221,16 @@ class DownloaderFinishedHandler:
             input_key=payload.output_key, # File location
             task_id=work_key
         )
+        logger.info(
+            "stage.downloader.done.dispatched_parser",
+            extra={
+                "trace_id": context.trace_id,
+                "task_type": context.task_type,
+                "work_key": work_key,
+                "download_output_key": payload.output_key,
+                "duration_ms": int((time.monotonic() - t0) * 1000),
+            },
+        )
         
 class ParserFinishedHandler:
     def __init__(self, mq: MQManager, state: StateManager, storage: StorageBackend):
@@ -192,6 +239,7 @@ class ParserFinishedHandler:
         self.storage = storage
 
     async def handle(self, message: MessagePackage, context: JobContext) -> None:
+        t0 = time.monotonic()
         payload = EventPayload(**message.payload)
         if payload.status != "SUCCESS":
             return
@@ -222,74 +270,153 @@ class ParserFinishedHandler:
             return
 
         if context.task_type == "MORNING_REPORT":
-             await self.mq.publish_command(
+            await self.mq.publish_command(
                 routing_key="cmd.indexer.start",
                 trace_id=context.trace_id,
                 task_type="indexer",
                 input_key=payload.output_key, # Parsed data location
                 task_id=work_key
             )
+            logger.info(
+                "stage.parser.done.dispatched_indexer",
+                extra={
+                    "trace_id": context.trace_id,
+                    "task_type": context.task_type,
+                    "work_key": work_key,
+                    "parse_output_key": payload.output_key,
+                    "duration_ms": int((time.monotonic() - t0) * 1000),
+                },
+            )
         elif context.task_type == "SUMMARY_REPORT":
-            # Aggregation Logic
-            current_ctx = await self.state.get_context(context.trace_id)
-            if not current_ctx: return
-
-            # Add work_key to completed set (with None check for safety)
-            completed = set(current_ctx.completed_work_keys)
-            if work_key:  # Ensure work_key is not None
+            # Aggregation Logic (atomic to avoid race conditions)
+            def update_completed_and_artifacts(ctx: JobContext) -> Dict[str, Any]:
+                completed = set(ctx.completed_work_keys)
                 completed.add(work_key)
-            await self.state.update_context(context.trace_id, {"completed_work_keys": list(completed)})
-            
-            # Check for completion
-            all_keys = set(current_ctx.work_keys)
-            failures = set(f.work_key for f in current_ctx.failures)
-            
-            if (completed | failures) >= all_keys:
-                # Trigger Overview
+
+                artifacts = dict(ctx.artifacts or {})
+                # Keep a pointer to the parse output key per work item (helps reconciliation and report building).
+                if payload.output_key:
+                    artifacts[f"parse:{work_key}"] = payload.output_key
+
+                return {"completed_work_keys": list(completed), "artifacts": artifacts}
+
+            updated_ctx = await self.state.atomic_update_context(context.trace_id, update_completed_and_artifacts)
+
+            all_keys = set(updated_ctx.work_keys or [])
+            completed = set(updated_ctx.completed_work_keys or [])
+            failures = set(f.work_key for f in (updated_ctx.failures or []))
+
+            if all_keys and (completed | failures) >= all_keys and updated_ctx.current_stage == "processing":
+                logger.info(
+                    "stage.parser.summary_report.all_parsed.trigger_overview",
+                    extra={
+                        "trace_id": context.trace_id,
+                        "task_type": context.task_type,
+                        "work_total": len(all_keys),
+                        "completed_count": len(completed),
+                        "failed_count": len(failures),
+                    },
+                )
+
                 summaries = []
                 for wk in completed:
-                    # Reconstruct parse output key: data:parse:{input_key}
-                    # input_key was data:work:{wk}
-                    parse_key = f"data:parse:data:work:{wk}"
+                    # Prefer the parse output key recorded in artifacts; fall back to canonical pattern.
+                    parse_key = (updated_ctx.artifacts or {}).get(f"parse:{wk}") or f"data:parse:data:work:{wk}"
                     parse_data = await self.storage.get(parse_key)
-                    if not parse_data: continue
-                    
-                    summaries.append({
-                        "paper": {
-                            "title": parse_data.get("title"),
-                            "authors": [],
-                            "pdf_url": parse_data.get("meta", {}).get("source_url")
-                        },
-                        "llm_summary": parse_data.get("llm_summary", "")
-                    })
-                
+                    if not isinstance(parse_data, dict):
+                        continue
+                    meta = parse_data.get("meta") if isinstance(parse_data.get("meta"), dict) else {}
+                    summaries.append(
+                        {
+                            "paper": {
+                                "title": parse_data.get("title"),
+                                "authors": [],
+                                "pdf_url": meta.get("source_url"),
+                            },
+                            "llm_summary": parse_data.get("llm_summary", "") or "",
+                        }
+                    )
+
                 if summaries:
                     overview_in_key = f"task:{context.trace_id}:overview_in"
-                    await self.storage.put(overview_in_key, {
-                        "summaries": summaries,
-                        "target_lang": "en",
-                        "domain": context.metadata.get("domain", ""),
-                        "style": context.metadata.get("style", "academic")
-                    })
-                    
+                    await self.storage.put(
+                        overview_in_key,
+                        {
+                            "summaries": summaries,
+                            "target_lang": "en",
+                            "domain": context.metadata.get("domain", ""),
+                            "style": context.metadata.get("style", "academic"),
+                        },
+                    )
+
+                    # Mark stage transition (idempotent)
+                    await self.state.update_context(context.trace_id, {"current_stage": "overview"})
+
                     await self.mq.publish_command(
                         routing_key="cmd.overview.start",
                         trace_id=context.trace_id,
                         task_type="overview",
                         input_key=overview_in_key,
-                        task_id=context.trace_id
+                        task_id=context.trace_id,
                     )
+                    logger.info(
+                        "stage.overview.dispatched",
+                        extra={
+                            "trace_id": context.trace_id,
+                            "task_type": context.task_type,
+                            "overview_in_key": overview_in_key,
+                            "summaries_count": len(summaries),
+                            "duration_ms": int((time.monotonic() - t0) * 1000),
+                        },
+                    )
+                else:
+                    # No summaries means we cannot produce overview; finalize to avoid infinite polling
+                    await self.state.update_context(context.trace_id, {"current_stage": "completed"})
+                    JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
+                    logger.warning(
+                        "stage.parser.summary_report.no_summaries.completed",
+                        extra={
+                            "trace_id": context.trace_id,
+                            "task_type": context.task_type,
+                            "work_total": len(all_keys),
+                            "completed_count": len(completed),
+                            "failed_count": len(failures),
+                            "duration_ms": int((time.monotonic() - t0) * 1000),
+                        },
+                    )
+            else:
+                logger.info(
+                    "stage.parser.summary_report.partial_progress",
+                    extra={
+                        "trace_id": context.trace_id,
+                        "task_type": context.task_type,
+                        "work_total": len(all_keys),
+                        "completed_count": len(completed),
+                        "failed_count": len(failures),
+                        "duration_ms": int((time.monotonic() - t0) * 1000),
+                    },
+                )
 
 class OverviewFinishedHandler:
     def __init__(self, state: StateManager):
         self.state = state
 
     async def handle(self, message: MessagePackage, context: JobContext) -> None:
+        t0 = time.monotonic()
         payload = EventPayload(**message.payload)
         if payload.status != "SUCCESS": return
         
         await self.state.update_context(context.trace_id, {"current_stage": "completed"})
         JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
+        logger.info(
+            "stage.overview.done.completed",
+            extra={
+                "trace_id": context.trace_id,
+                "task_type": context.task_type,
+                "overview_output_key": payload.output_key,
+                "duration_ms": int((time.monotonic() - t0) * 1000),
+            },
+        )
 
 class IndexerFinishedHandler:
     def __init__(self, mq: MQManager, state: StateManager, storage: StorageBackend):
@@ -298,6 +425,7 @@ class IndexerFinishedHandler:
         self.storage = storage
 
     async def handle(self, message: MessagePackage, context: JobContext) -> None:
+        t0 = time.monotonic()
         payload = EventPayload(**message.payload)
         if payload.status != "SUCCESS":
             return
@@ -359,6 +487,18 @@ class IndexerFinishedHandler:
                     return updates
             
                 await self.state.atomic_update_context(context.trace_id, update_status_and_artifacts)
+                logger.info(
+                    "stage.indexer.all_done.generated_manifest",
+                    extra={
+                        "trace_id": context.trace_id,
+                        "task_type": context.task_type,
+                        "manifest_key": manifest_key,
+                        "work_total": len(all_keys),
+                        "completed_count": len(completed),
+                        "failed_count": len(failures),
+                        "duration_ms": int((time.monotonic() - t0) * 1000),
+                    },
+                )
             else:
                 # Default completion logic for other types
                 def update_status(ctx: JobContext) -> Dict[str, Any]:
@@ -368,6 +508,18 @@ class IndexerFinishedHandler:
                 await self.state.atomic_update_context(context.trace_id, update_status)
 
             JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
+        else:
+            logger.info(
+                "stage.indexer.partial_progress",
+                extra={
+                    "trace_id": context.trace_id,
+                    "task_type": context.task_type,
+                    "work_total": len(all_keys),
+                    "completed_count": len(completed),
+                    "failed_count": len(failures),
+                    "duration_ms": int((time.monotonic() - t0) * 1000),
+                },
+            )
 
 class FailureHandler:
     def __init__(self, state: StateManager, mq: MQManager, storage: StorageBackend):
@@ -376,6 +528,7 @@ class FailureHandler:
         self.storage = storage
 
     async def handle(self, message: MessagePackage, context: JobContext) -> None:
+        t0 = time.monotonic()
         payload = EventPayload(**message.payload)
         try:
             work_key = infer_work_key(payload.input_key or "")
@@ -398,6 +551,18 @@ class FailureHandler:
             return {"failures": new_failures}
             
         updated_ctx = await self.state.atomic_update_context(context.trace_id, update_fn)
+        logger.warning(
+            "stage.failed.recorded",
+            extra={
+                "trace_id": context.trace_id,
+                "task_type": context.task_type,
+                "stage": message.header.task_type,
+                "work_key": work_key,
+                "input_key": payload.input_key,
+                "error_msg": payload.error_msg,
+                "duration_ms": int((time.monotonic() - t0) * 1000),
+            },
+        )
 
         # Check completion
         completed = set(updated_ctx.completed_work_keys)
@@ -406,6 +571,21 @@ class FailureHandler:
 
         if (completed | failed_keys) >= all_keys:
             if context.task_type == "SUMMARY_REPORT":
+                # If overview itself failed, don't loop forever: finalize with failures.
+                if str(message.header.task_type or "").lower() == "overview":
+                    await self.state.update_context(context.trace_id, {"current_stage": "completed"})
+                    JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
+                    logger.warning(
+                        "stage.overview.failed.completed",
+                        extra={
+                            "trace_id": context.trace_id,
+                            "task_type": context.task_type,
+                            "completed_count": len(completed),
+                            "failed_count": len(failed_keys),
+                            "work_total": len(all_keys),
+                        },
+                    )
+                    return
                 # Trigger Overview with partial results
                 summaries = []
                 for wk in completed:
@@ -429,12 +609,36 @@ class FailureHandler:
                         "domain": context.metadata.get("domain", ""),
                         "style": context.metadata.get("style", "academic")
                     })
+                    await self.state.update_context(context.trace_id, {"current_stage": "overview"})
                     await self.mq.publish_command(
                         routing_key="cmd.overview.start",
                         trace_id=context.trace_id,
                         task_type="overview",
                         input_key=overview_in_key,
                         task_id=context.trace_id
+                    )
+                    logger.info(
+                        "stage.failure.summary_report.trigger_overview",
+                        extra={
+                            "trace_id": context.trace_id,
+                            "task_type": context.task_type,
+                            "overview_in_key": overview_in_key,
+                            "summaries_count": len(summaries),
+                        },
+                    )
+                else:
+                    # Nothing to summarize; finalize to avoid infinite polling
+                    await self.state.update_context(context.trace_id, {"current_stage": "completed"})
+                    JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
+                    logger.warning(
+                        "stage.failure.summary_report.no_summaries.completed",
+                        extra={
+                            "trace_id": context.trace_id,
+                            "task_type": context.task_type,
+                            "completed_count": len(completed),
+                            "failed_count": len(failed_keys),
+                            "work_total": len(all_keys),
+                        },
                     )
             elif updated_ctx.current_stage != "completed":
                 # Generate Manifest for MORNING_REPORT even if failures occurred
@@ -468,6 +672,17 @@ class FailureHandler:
                         return updates
                 
                     await self.state.atomic_update_context(context.trace_id, update_status_and_artifacts)
+                    logger.info(
+                        "stage.failure.morning_report.generated_manifest",
+                        extra={
+                            "trace_id": context.trace_id,
+                            "task_type": context.task_type,
+                            "manifest_key": manifest_key,
+                            "completed_count": len(completed),
+                            "failed_count": len(failed_keys),
+                            "work_total": len(all_keys),
+                        },
+                    )
                 else:
                     # Atomic update status
                     def update_status(ctx: JobContext) -> Dict[str, Any]:

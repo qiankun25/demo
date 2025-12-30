@@ -16,7 +16,7 @@ from typing import Dict, Any
 # 配置
 NEXUS_URL = "http://localhost:8000/api/v1"
 POLL_INTERVAL = 5  # 轮询间隔（秒）
-MAX_WAIT_TIME = 600  # 最大等待时间（秒），10分钟
+MAX_WAIT_TIME = 300  # 最大等待时间（秒），10分钟
 
 
 def submit_job(task_type: str, parameters: Dict[str, Any]) -> str:
@@ -188,8 +188,8 @@ def test_morning_report():
         trace_id = submit_job(
             "MORNING_REPORT",
             {
-                "limit": 3,
-                "query": "large language model",
+                "limit": 10,
+                "query": "LLM",
                 "filters": {
                     "publication_year": "2024"
                 }

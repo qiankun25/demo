@@ -1,6 +1,7 @@
 import asyncio
 import json
 import traceback
+import time
 import aio_pika
 from aio_pika import ExchangeType, DeliveryMode, Message
 
@@ -22,8 +23,13 @@ class BaseToolService:
             self.connection = await aio_pika.connect_robust(RabbitConfig.URL)
             self.channel = await self.connection.channel()
             
-            # QoS: 预取 1
-            await self.channel.set_qos(prefetch_count=1)
+            # QoS: 默认预取 1（可通过环境变量调整，减少 fan-out 堆积导致的 TTL/DLQ）
+            try:
+                prefetch = int(os.getenv("NEXUS_PREFETCH", "1"))
+            except Exception:
+                prefetch = 1
+            prefetch = max(1, min(prefetch, 100))
+            await self.channel.set_qos(prefetch_count=prefetch)
 
             # 2. 声明交换机
             cmd_exchange = await self.channel.declare_exchange(
@@ -42,10 +48,12 @@ class BaseToolService:
 
             # 4. 声明工作队列
             args = {
-                'x-message-ttl': RabbitConfig.TTL_MS,
                 'x-dead-letter-exchange': RabbitConfig.DLX_EXCHANGE,
                 'x-dead-letter-routing-key': self.cmd_routing_key
             }
+            # TTL<=0 视为禁用（避免消息在队列等待过久被死信，导致编排侧永远 pending）
+            if int(getattr(RabbitConfig, "TTL_MS", 0) or 0) > 0:
+                args['x-message-ttl'] = int(RabbitConfig.TTL_MS)
             queue = await self.channel.declare_queue(
                 self.queue_name, durable=True, arguments=args
             )
@@ -73,6 +81,7 @@ class BaseToolService:
 
     async def _on_message(self, message: aio_pika.abc.AbstractIncomingMessage):
         """核心消息处理逻辑"""
+        t0 = time.monotonic()
         try:
             # A. 反序列化
             body_str = message.body.decode()
@@ -80,7 +89,23 @@ class BaseToolService:
             pkg = MessagePackage(**data)
             cmd = CommandPayload(**pkg.payload)
 
-            print(f"[{self.service_name}] Received Task: {pkg.header.trace_id}")
+            print(
+                json.dumps(
+                    {
+                        "ts": time.time(),
+                        "level": "INFO",
+                        "svc": self.service_name,
+                        "event": "cmd.received",
+                        "trace_id": pkg.header.trace_id,
+                        "task_type": pkg.header.task_type,
+                        "sender": pkg.header.sender,
+                        "task_id": cmd.task_id,
+                        "input_key": cmd.input_key,
+                        "params_keys": sorted(list((cmd.params or {}).keys())),
+                    },
+                    ensure_ascii=False,
+                )
+            )
 
             # B. 执行业务逻辑 (抽象)
             output_key = await self.do_work(cmd.input_key, cmd.params)
@@ -90,7 +115,22 @@ class BaseToolService:
             routing_key = f"evt.{self.service_name}.finished"
 
         except Exception as e:
-            print(f"[ERROR] {self.service_name} Failed: {e}")
+            print(
+                json.dumps(
+                    {
+                        "ts": time.time(),
+                        "level": "ERROR",
+                        "svc": self.service_name,
+                        "event": "cmd.failed",
+                        "trace_id": pkg.header.trace_id if "pkg" in locals() else None,
+                        "task_type": pkg.header.task_type if "pkg" in locals() else None,
+                        "task_id": cmd.task_id if "cmd" in locals() else None,
+                        "input_key": cmd.input_key if "cmd" in locals() else None,
+                        "error": str(e),
+                    },
+                    ensure_ascii=False,
+                )
+            )
             traceback.print_exc()
             # D. 构建失败事件
             if 'pkg' in locals():
@@ -105,6 +145,24 @@ class BaseToolService:
         # E. 发布事件
         if 'pkg' in locals():
             await self._publish_event(pkg.header, resp_payload, routing_key)
+            print(
+                json.dumps(
+                    {
+                        "ts": time.time(),
+                        "level": "INFO",
+                        "svc": self.service_name,
+                        "event": "evt.published",
+                        "trace_id": pkg.header.trace_id,
+                        "task_type": pkg.header.task_type,
+                        "routing_key": routing_key,
+                        "status": resp_payload.status,
+                        "output_key": getattr(resp_payload, "output_key", None),
+                        "input_key": getattr(resp_payload, "input_key", None),
+                        "duration_ms": int((time.monotonic() - t0) * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+            )
 
     async def _publish_event(self, req_header: MsgHeader, payload: EventPayload, routing_key: str):
         # 更新 Header

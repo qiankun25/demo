@@ -37,6 +37,22 @@ class StatusService:
         context = await self.orchestrator.get_job_status(trace_id)
         if not context:
             return None
+
+        # Best-effort reconciliation to avoid a known stuck state:
+        # SUMMARY_REPORT can end up with completed=total but status remains "processing" if overview triggering was missed.
+        # This call is idempotent and will only do work when the job is objectively ready to advance.
+        try:
+            if (
+                context.task_type == "SUMMARY_REPORT"
+                and context.current_stage == "processing"
+                and len(context.work_keys) > 0
+                and (len(context.completed_work_keys) + len(context.failures)) >= len(context.work_keys)
+            ):
+                await self.orchestrator._check_completion(trace_id)
+                context = await self.orchestrator.get_job_status(trace_id) or context
+        except Exception:
+            # Never fail the status endpoint due to reconciliation issues.
+            pass
             
         total = len(context.work_keys)
         completed = len(context.completed_work_keys)

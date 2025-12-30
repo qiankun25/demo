@@ -178,6 +178,15 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=papers
+      # Ensure the HTTP API and the embedded MQ worker write/read the SAME persistent storage.
+      # NOTE: indexing_service settings use env_prefix "INDEX_"
+      - INDEX_DATABASE_URL=sqlite:////app/data/index.db
+      - INDEX_CHROMA_PERSIST_DIR=/app/.chroma
+      - INDEX_CHROMA_COLLECTION=morning_report
+    volumes:
+      # Use directory mount to avoid the common "host file missing -> becomes directory" pitfall.
+      - ./tool_services/indexing_service/data:/app/data
+      - ./tool_services/indexing_service/.chroma:/app/.chroma
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -194,6 +203,11 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=papers
+      # Required for real overview generation (otherwise Nexus will fall back to a local summary)
+      - SILICONFLOW2_API_KEY=${SILICONFLOW2_API_KEY:-}
+      # Optional overrides
+      - SILICONFLOW2_API_BASE=${SILICONFLOW2_API_BASE:-https://api.siliconflow.cn/v1/chat/completions}
+      - SILICONFLOW2_MODEL=${SILICONFLOW2_MODEL:-deepseek-ai/DeepSeek-V3}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -211,6 +225,10 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=papers
+      # Optional: enable LLM summary inside parser (used by MORNING_REPORT output)
+      - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY:-}
+      - SILICONFLOW_API_BASE=${SILICONFLOW_API_BASE:-https://api.siliconflow.cn/v1/chat/completions}
+      - SILICONFLOW_MODEL=${SILICONFLOW_MODEL:-deepseek-ai/DeepSeek-V3}
     depends_on:
       rabbitmq:
         condition: service_healthy

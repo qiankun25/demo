@@ -4,6 +4,7 @@ from typing import Callable, Awaitable
 from fastapi import FastAPI
 from app.api.dependencies import get_mq_manager, get_settings, get_storage, get_state_manager, get_workflow_registry
 from app.engine.orchestrator import WorkflowOrchestrator
+from app.core.logging import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +12,8 @@ def create_start_app_handler(app: FastAPI) -> Callable[[], Awaitable[None]]:
     async def start_app() -> None:
         try:
             settings = get_settings()
+            # Ensure structured JSON logging is enabled early (so startup logs are consistent)
+            setup_logging(settings.log_level)
             
             # Initialize services
             mq_manager = await get_mq_manager(settings)

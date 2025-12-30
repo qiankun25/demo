@@ -191,6 +191,9 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=papers
+      - SILICONFLOW2_API_KEY=${SILICONFLOW2_API_KEY:-}
+      - SILICONFLOW2_API_BASE=${SILICONFLOW2_API_BASE:-https://api.siliconflow.cn/v1/chat/completions}
+      - SILICONFLOW2_MODEL=${SILICONFLOW2_MODEL:-deepseek-ai/DeepSeek-V3}
     depends_on:
       rabbitmq:
         condition: service_healthy

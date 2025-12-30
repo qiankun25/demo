@@ -506,212 +506,117 @@ curl -X POST http://localhost:8002/translate ^
 
 ---
 
-## 3. Retrieval Service（检索编排）
+## 3. Indexing Service（索引 / 语义检索）
 
 ### 3.1 基本信息
-- 默认监听：`http://localhost:8003`
-- 推荐快速测试：`POST /search_simple`（来自 [API_TEST_GUIDE.md](file:///d:/05_python/demo/API_TEST_GUIDE.md#L71-L119)）
+- 默认监听：`http://localhost:8020`
 
 ### 3.2 API
 
-#### 1) 健康检查
-**Method & Path**  
-`GET /health`
-
-**响应**
-- `200 OK`（application/json）
-
-```json
-{"status":"ok"}
-```
-
-#### 2) 简易本地检索（不依赖 indexing_service）
-**Method & Path**  
-`POST /search_simple`
-
-**请求头**  
-- `Content-Type: application/json`
-
-**请求体（application/json）**（来自 [retrieval main.py](file:///d:/05_python/demo/tool_services/retrieval_service/main.py#L168-L171)）
-
-```json
-{
-  "query": "Machine Learning",
-  "top_k": 5
-}
-```
-
-**响应**
-- `200 OK`（application/json）
-
-响应体示例（来自 [API_TEST_GUIDE.md](file:///d:/05_python/demo/API_TEST_GUIDE.md#L99-L113)）：
-
-```json
-{
-  "query": "Machine Learning",
-  "hits": [
-    {
-      "chunk_id": "doc_123:0",
-      "doc_id": "doc_123",
-      "text": "Machine learning is a subset of artificial intelligence...",
-      "score": 0.8,
-      "source": "local_simple"
-    }
-  ]
-}
-```
-
-**请求示例（curl）**
-
-```bash
-curl -X POST http://localhost:8003/search_simple ^
-  -H "Content-Type: application/json" ^
-  -d "{\"query\":\"Machine Learning\",\"top_k\":5}"
-```
-
-#### 3) 本地知识库概览（转发 indexing_service）
-**Method & Path**  
-`GET /kb/overview`
-
-**描述**  
-返回本地知识库摘要信息（会调用 indexing_service 的 `/kb/overview`）（见 [retrieval main.py](file:///d:/05_python/demo/tool_services/retrieval_service/main.py#L273-L287)）。
-
-**查询参数**
-- `limit`（int，默认 20）：最大返回文档条数（内部限制 `1..200`）
-- `offset`（int，默认 0）：偏移量（内部限制 `>= 0`）
-
-**响应**
-- `200 OK`（application/json）  
-  Schema：`KnowledgeBaseOverviewResponse`
-
-```json
-{
-  "docs_count": 1,
-  "chunks_count": 12,
-  "docs": [
-    {
-      "doc_id": "doc_123",
-      "canonical_id": "arxiv:2105.13495",
-      "title": "Example Paper",
-      "year": 2021,
-      "venue": "arXiv",
-      "source": "local",
-      "pdf_sha256": "b6b3a1b6c9f2f68c5b2d7d5a0b6c7a0b8a7a0a0a0a0a0a0a0a0a0a0a0a0",
-      "created_at_unix": 1700000000
-    }
-  ]
-}
-```
-
-**请求示例（curl）**
-
-```bash
-curl "http://localhost:8003/kb/overview?limit=20&offset=0"
-```
-
-#### 4) 查询文档处理状态
-**Method & Path**  
-`GET /status/{doc_key}`
-
-**描述**  
-查询 SQLite 中记录的文档状态（见 [retrieval main.py](file:///d:/05_python/demo/tool_services/retrieval_service/main.py#L258-L270)）。
-
-**路径参数**
-- `doc_key`（string，必填）：文档主键（`cid:*` 或 `url:*`）
-
-**响应**
-- `200 OK`（application/json）  
-  Schema：`StatusResponse`
-
-```json
-{
-  "doc_key": "cid:arxiv:2105.13495",
-  "status": "Indexed",
-  "canonical_id": "arxiv:2105.13495",
-  "pdf_sha256": "b6b3a1b6c9f2f68c5b2d7d5a0b6c7a0b8a7a0a0a0a0a0a0a0a0a0a0a0a0",
-  "last_error": null
-}
-```
-
-- `404 Not Found`（application/json）
-
-```json
-{
-  "detail": "not found"
-}
-```
-
-**请求示例（curl）**
-
-```bash
-curl http://localhost:8003/status/cid:arxiv:2105.13495
-```
-
-#### 5) 统一检索（本地优先 + 外部补全）
+#### 1) 语义检索 / 混合检索
 **Method & Path**  
 `POST /search`
 
 **描述**  
-优先本地检索，不足则外部检索，并可异步入库外部命中（见 [retrieval main.py](file:///d:/05_python/demo/tool_services/retrieval_service/main.py#L289-L330)）。
+对本地已入库内容进行检索：
+- `use_vector=true`：启用向量检索（语义检索，底层使用 Chroma）
+- `use_fts=true`：启用全文关键词检索（若后端可用）并与向量检索结果融合
+- 返回命中列表，每条包含 `doc`（文档元信息）、`chunk`（命中片段）、`score`（融合分）以及 `explain`（解释字段）
 
 **请求头**  
 - `Content-Type: application/json`
 
-**请求体（application/json）**（Schema：`SearchRequest`）
+**请求体（application/json）**  
 
 ```json
 {
-  "query": "Machine Learning",
-  "k": 10,
+  "query": "GNN",
+  "k": 5,
   "kinds": ["paper"],
   "filters": {},
-  "sources": ["openalex"]
+  "use_vector": true,
+  "use_fts": false
 }
 ```
 
+字段说明：
+- `query`（string，必填）：检索文本
+- `k`（int，默认 10，范围 1~50）：返回 top-k 数量
+- `kinds`（string[]，可选）：按资源种类过滤，可选值：`paper` / `dataset` / `code`；为空则不过滤
+- `filters`（object，默认 `{}`）：过滤条件（当前实现至少支持 `canonical_id` 精确过滤）
+- `use_vector`（bool，默认 true）：是否启用向量检索（语义检索）
+- `use_fts`（bool，默认 true）：是否启用关键词检索并融合
+
 **响应**
-- `200 OK`（application/json）  
-  Schema：`SearchResponse`
+- `200 OK`（application/json）
+
+响应体格式：
 
 ```json
 {
-  "query": "Machine Learning",
-  "local_hits": [
+  "query": "GNN",
+  "hits": [
     {
-      "kind": "local",
-      "score": 0.42,
       "doc": {
-        "doc_id": "doc_123"
+        "doc_id": "string",
+        "canonical_id": "string",
+        "doc_type": "paper",
+        "title": "string"
       },
       "chunk": {
-        "chunk_id": "doc_123:0"
+        "chunk_id": "string",
+        "doc_id": "string",
+        "text": "string",
+        "page": 1,
+        "paragraph": -1,
+        "section_path": "string"
       },
-      "explain": {}
-    }
-  ],
-  "external_hits": [
-    {
-      "kind": "external",
-      "resource": {
-        "title": "External Example",
-        "url": "https://example.com/paper"
+      "score": 0.0,
+      "explain": {
+        "rrf": 0.0,
+        "vector": 0.0,
+        "fts": 0.0
       }
     }
-  ],
-  "merged_hits": [
-    {
-      "kind": "local",
-      "score": 0.42
-    }
-  ],
-  "ingest_enqueued": 1
+  ]
+}
+```
+
+说明：
+- `hits` 可能为空数组 `[]`（表示没有命中，或库中尚无数据）
+- `score` 为最终融合分（通常是 RRF 融合分）
+- `explain.vector` 为向量相似度（越大越好；通常约等于 `1 - distance`）
+- `explain.fts` 为关键词检索分（可能为 `null` 或缺失，取决于后端与开关）
+
+**错误响应**
+- `400 Bad Request`（application/json）
+
+```json
+{
+  "detail": "string"
+}
+```
+
+- `500/502`（application/json）
+
+```json
+{
+  "detail": "string"
 }
 ```
 
 **请求示例（curl）**
 
 ```bash
-curl -X POST http://localhost:8003/search ^
-  -H "Content-Type: application/json" ^
-  -d "{\"query\":\"Machine Learning\",\"k\":10,\"kinds\":[\"paper\"],\"filters\":{},\"sources\":[\"openalex\"]}"
+curl -X POST "http://localhost:8020/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "GNN",
+    "k": 5,
+    "kinds": ["paper"],
+    "filters": {},
+    "use_vector": true,
+    "use_fts": false
+  }'
 ```
+

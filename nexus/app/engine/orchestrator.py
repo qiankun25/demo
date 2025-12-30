@@ -1,3 +1,4 @@
+import os
 import uuid
 import logging
 import time
@@ -19,12 +20,14 @@ from app.engine.handlers import (
 from app.core.config import get_settings
 from app.infrastructure.metrics import (
     JOB_SUBMITTED_TOTAL, 
+    JOB_COMPLETED_TOTAL,
     EVENT_PROCESSING_SECONDS
 )
 
 logger = logging.getLogger(__name__)
 
 from app.engine.utils import generate_work_key
+from app.core.logging import set_trace_context, clear_trace_context
 
 class WorkflowOrchestrator:
     def __init__(
@@ -59,11 +62,13 @@ class WorkflowOrchestrator:
         self.failure_handler = FailureHandler(state_manager, mq, storage)
 
     async def submit_job(self, task_type: str, params: Dict) -> str:
+        t0 = time.monotonic()
         workflow = self.registry.get_workflow(task_type)
         if not workflow:
             raise ValueError(f"Unknown task type: {task_type}")
 
         trace_id = str(uuid.uuid4())
+        set_trace_context(trace_id)
         
         context = JobContext(
             trace_id=trace_id,
@@ -76,6 +81,15 @@ class WorkflowOrchestrator:
         # Input key
         input_key = f"data:job:{trace_id}:input"
         await self.storage.put(input_key, params)
+        logger.info(
+            "job.submit.stored_input",
+            extra={
+                "trace_id": trace_id,
+                "job_task_type": task_type,
+                "input_key": input_key,
+                "duration_ms": int((time.monotonic() - t0) * 1000),
+            },
+        )
         
         if task_type == "SUMMARY_REPORT":
             # SUMMARY_REPORT Special Logic: Fan-out on start
@@ -157,6 +171,15 @@ class WorkflowOrchestrator:
             context.current_stage = "processing"
             await self.state_manager.save_context(context)
             logger.info(f"Started SUMMARY_REPORT {trace_id} with {len(work_keys)} papers")
+            logger.info(
+                "job.submit.summary_report.fanout_parser",
+                extra={
+                    "trace_id": trace_id,
+                    "job_task_type": task_type,
+                    "work_items": len(work_keys),
+                    "duration_ms": int((time.monotonic() - t0) * 1000),
+                },
+            )
             
         else:
             # Standard Linear/Discovery Start
@@ -181,23 +204,58 @@ class WorkflowOrchestrator:
             )
             
             await self.state_manager.update_context(trace_id, {"current_stage": first_stage.name})
+            logger.info(
+                "job.submit.published_first_stage",
+                extra={
+                    "trace_id": trace_id,
+                    "job_task_type": task_type,
+                    "first_stage": first_stage.name,
+                    "routing_key": first_stage.command_routing_key,
+                    "input_key": input_key,
+                    "duration_ms": int((time.monotonic() - t0) * 1000),
+                },
+            )
         
         JOB_SUBMITTED_TOTAL.labels(task_type=task_type).inc()
+        clear_trace_context()
         
         return trace_id
 
     async def handle_event(self, message: MessagePackage) -> None:
+        t0 = time.monotonic()
         trace_id = message.header.trace_id
+        set_trace_context(trace_id)
         
         context = await self.state_manager.get_context(trace_id)
         if not context:
             logger.error(f"Context not found for trace_id: {trace_id}")
+            clear_trace_context()
             return
 
         payload = EventPayload(**message.payload)
+        logger.info(
+            "evt.received",
+            extra={
+                "trace_id": trace_id,
+                "evt_sender": message.header.sender,
+                "evt_task_type": message.header.task_type,
+                "status": payload.status,
+                "input_key": payload.input_key,
+                "output_key": payload.output_key,
+            },
+        )
         
         if payload.status != "SUCCESS":
             await self.failure_handler.handle(message, context)
+            logger.info(
+                "evt.handled.failure",
+                extra={
+                    "trace_id": trace_id,
+                    "evt_task_type": message.header.task_type,
+                    "duration_ms": int((time.monotonic() - t0) * 1000),
+                },
+            )
+            clear_trace_context()
             return
 
         # Determine handler based on task_type
@@ -210,13 +268,71 @@ class WorkflowOrchestrator:
         handler = self.handlers.get(event_key)
         if handler:
             start_time = time.time()
-            await handler.handle(message, context)
+            logger.info(
+                "evt.handler.selected",
+                extra={
+                    "trace_id": trace_id,
+                    "event_key": event_key,
+                    "handler": handler.__class__.__name__,
+                },
+            )
+            # Handler errors should not cause infinite event redelivery loops.
+            # If a handler raises, we log and record it as a failure record so the job can still complete.
+            try:
+                await handler.handle(message, context)
+            except Exception as e:
+                logger.error(
+                    "evt.handler.exception",
+                    exc_info=True,
+                    extra={
+                        "trace_id": trace_id,
+                        "event_key": event_key,
+                        "handler": handler.__class__.__name__,
+                        "error": str(e),
+                    },
+                )
+                # Best-effort: treat orchestrator-side exceptions as failures to avoid hanging jobs.
+                fail_pkg = MessagePackage(
+                    header=message.header,
+                    payload={
+                        "status": "FAIL",
+                        "input_key": payload.input_key,
+                        "output_key": payload.output_key,
+                        "error_msg": f"orchestrator handler error: {e}",
+                    },
+                )
+                try:
+                    await self.failure_handler.handle(fail_pkg, context)
+                except Exception:
+                    logger.error(
+                        "evt.handler.exception.failure_handler_failed",
+                        exc_info=True,
+                        extra={"trace_id": trace_id, "event_key": event_key},
+                    )
             EVENT_PROCESSING_SECONDS.labels(handler=task_type).observe(time.time() - start_time)
+            logger.info(
+                "evt.handler.done",
+                extra={
+                    "trace_id": trace_id,
+                    "event_key": event_key,
+                    "handler": handler.__class__.__name__,
+                    "duration_ms": int((time.monotonic() - t0) * 1000),
+                },
+            )
         else:
             logger.warning(f"No handler found for event: {event_key}")
+            logger.warning(
+                "evt.handler.missing",
+                extra={
+                    "trace_id": trace_id,
+                    "event_key": event_key,
+                    "raw_task_type": message.header.task_type,
+                },
+            )
             
         # Check completion
         await self._check_completion(trace_id)
+        clear_trace_context()
 
     async def get_job_status(self, trace_id: str) -> Optional[JobContext]:
         return await self.state_manager.get_context(trace_id)
@@ -233,12 +349,222 @@ class WorkflowOrchestrator:
         return None
 
     async def _check_completion(self, trace_id: str) -> bool:
-        # Check if job is complete
+        # Reconcile job state transitions that might be missed due to race conditions
+        # or upstream variations in stage handlers. This is intentionally idempotent.
         context = await self.state_manager.get_context(trace_id)
         if not context:
             return False
             
         if context.current_stage == "completed":
             return True
+
+        # SUMMARY_REPORT: once all parse tasks are done (success or fail), trigger overview aggregation.
+        # This is a safety net to avoid jobs getting stuck at `processing` indefinitely.
+        if context.task_type == "SUMMARY_REPORT":
+            all_keys = set(context.work_keys or [])
+            completed = set(context.completed_work_keys or [])
+            failed = set((f.work_key for f in (context.failures or [])) if context.failures else [])
+
+            if all_keys and (completed | failed) >= all_keys and context.current_stage == "processing":
+                # Build summaries from whatever successful parse artifacts we can find.
+                summaries = []
+                for wk in completed:
+                    # Prefer the canonical SUMMARY_REPORT parse pattern.
+                    parse_key_candidates = [
+                        f"data:parse:data:work:{wk}",
+                        # Fallback pattern when parser is fed downloader output (other workflows)
+                        f"data:parse:data:download:data:work:{wk}",
+                    ]
+                    parse_data = None
+                    for pk in parse_key_candidates:
+                        try:
+                            if await self.storage.exists(pk):
+                                parse_data = await self.storage.get(pk)
+                                break
+                        except Exception:
+                            continue
+
+                    if not isinstance(parse_data, dict):
+                        continue
+
+                    meta = parse_data.get("meta") if isinstance(parse_data.get("meta"), dict) else {}
+                    summaries.append(
+                        {
+                            "paper": {
+                                "title": parse_data.get("title"),
+                                "authors": [],
+                                "pdf_url": meta.get("source_url"),
+                            },
+                            "llm_summary": parse_data.get("llm_summary", "") or "",
+                        }
+                    )
+
+                if summaries:
+                    overview_in_key = f"task:{trace_id}:overview_in"
+                    try:
+                        await self.storage.put(
+                            overview_in_key,
+                            {
+                                "summaries": summaries,
+                                "target_lang": "en",
+                                "domain": context.metadata.get("domain", "") if isinstance(context.metadata, dict) else "",
+                                "style": context.metadata.get("style", "academic") if isinstance(context.metadata, dict) else "academic",
+                            },
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "reconcile.summary_report.storage_put_overview_in_failed",
+                            exc_info=True,
+                            extra={"trace_id": trace_id, "overview_in_key": overview_in_key, "error": str(e)},
+                        )
+                        return False
+
+                    # Move stage first so polling reflects real progress even if publish is delayed.
+                    try:
+                        await self.state_manager.update_context(trace_id, {"current_stage": "overview"})
+                    except Exception:
+                        logger.error(
+                            "reconcile.summary_report.update_stage_failed",
+                            exc_info=True,
+                            extra={"trace_id": trace_id},
+                        )
+                        return False
+
+                    # If overview tool service is not configured (common in local demo),
+                    # generate a lightweight fallback overview so the job can complete.
+                    if not (os.getenv("SILICONFLOW2_API_KEY") or "").strip():
+                        overview_out_key = f"data:overview:{overview_in_key}"
+                        overview_md = self._fallback_overview_markdown(summaries)
+                        await self.storage.put(
+                            overview_out_key,
+                            {
+                                "overview_md": overview_md,
+                                "meta": {
+                                    "model": "fallback",
+                                    "paper_count": len(summaries),
+                                    "domain": (context.metadata.get("domain", "") if isinstance(context.metadata, dict) else ""),
+                                    "style": (context.metadata.get("style", "academic") if isinstance(context.metadata, dict) else "academic"),
+                                },
+                            },
+                        )
+                        await self.state_manager.update_context(trace_id, {"current_stage": "completed"})
+                        JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
+                        logger.warning(
+                            "reconcile.summary_report.overview_fallback.completed",
+                            extra={"trace_id": trace_id, "overview_output_key": overview_out_key},
+                        )
+                        return True
+
+                    try:
+                        await self.mq.publish_command(
+                            routing_key="cmd.overview.start",
+                            trace_id=trace_id,
+                            task_type="overview",
+                            input_key=overview_in_key,
+                            task_id=trace_id,
+                        )
+                        logger.info(
+                            "reconcile.summary_report.overview_dispatched",
+                            extra={"trace_id": trace_id, "overview_in_key": overview_in_key, "summaries_count": len(summaries)},
+                        )
+                        return False
+                    except Exception:
+                        logger.error(
+                            "reconcile.summary_report.publish_overview_failed",
+                            exc_info=True,
+                            extra={"trace_id": trace_id},
+                        )
+                        return False
+
+                # Nothing to summarize -> finalize to avoid infinite polling.
+                await self.state_manager.update_context(trace_id, {"current_stage": "completed"})
+                JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
+                logger.warning(
+                    "reconcile.summary_report.no_summaries.completed",
+                    extra={"trace_id": trace_id, "completed_count": len(completed), "failed_count": len(failed), "work_total": len(all_keys)},
+                )
+                return True
+            # If we're already in overview stage, reconcile completion based on stored artifact presence.
+            if context.current_stage == "overview":
+                overview_in_key = f"task:{trace_id}:overview_in"
+                overview_out_key = f"data:overview:{overview_in_key}"
+                try:
+                    if await self.storage.exists(overview_out_key):
+                        await self.state_manager.update_context(trace_id, {"current_stage": "completed"})
+                        JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
+                        logger.info(
+                            "reconcile.summary_report.overview_output_present.completed",
+                            extra={"trace_id": trace_id, "overview_output_key": overview_out_key},
+                        )
+                        return True
+                except Exception:
+                    # ignore and fall through
+                    pass
+
+                # If tool service isn't configured, produce fallback output even in overview stage.
+                if not (os.getenv("SILICONFLOW2_API_KEY") or "").strip():
+                    # Reuse successful parse artifacts for fallback generation.
+                    summaries = []
+                    for wk in set(context.completed_work_keys or []):
+                        parse_key = f"data:parse:data:work:{wk}"
+                        try:
+                            parse_data = await self.storage.get(parse_key)
+                        except Exception:
+                            parse_data = None
+                        if not isinstance(parse_data, dict):
+                            continue
+                        meta = parse_data.get("meta") if isinstance(parse_data.get("meta"), dict) else {}
+                        summaries.append(
+                            {
+                                "paper": {"title": parse_data.get("title"), "authors": [], "pdf_url": meta.get("source_url")},
+                                "llm_summary": parse_data.get("llm_summary", "") or "",
+                            }
+                        )
+                    if summaries:
+                        overview_md = self._fallback_overview_markdown(summaries)
+                        await self.storage.put(
+                            overview_out_key,
+                            {
+                                "overview_md": overview_md,
+                                "meta": {"model": "fallback", "paper_count": len(summaries)},
+                            },
+                        )
+                    await self.state_manager.update_context(trace_id, {"current_stage": "completed"})
+                    JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
+                    logger.warning(
+                        "reconcile.summary_report.overview_fallback_in_overview.completed",
+                        extra={"trace_id": trace_id, "overview_output_key": overview_out_key},
+                    )
+                    return True
             
         return False
+
+    def _fallback_overview_markdown(self, summaries: list[dict]) -> str:
+        # Lightweight deterministic fallback: keep headings compatible with overview_service validation.
+        lines = []
+        lines.append("## Background")
+        lines.append("This overview was generated using a local fallback (no SILICONFLOW2_API_KEY configured).")
+        lines.append("")
+        lines.append("## Key Themes")
+        for item in summaries[:20]:
+            if not isinstance(item, dict):
+                continue
+            paper = item.get("paper") if isinstance(item.get("paper"), dict) else {}
+            title = (paper.get("title") or "N/A") if isinstance(paper, dict) else "N/A"
+            llm_summary = (item.get("llm_summary") or "").strip()
+            llm_summary = llm_summary[:800] + ("…" if len(llm_summary) > 800 else "")
+            lines.append(f"- **{title}**: {llm_summary or 'N/A'}")
+        lines.append("")
+        lines.append("## Open Problems")
+        lines.append("- N/A (fallback mode does not infer open problems).")
+        lines.append("")
+        lines.append("## References")
+        for item in summaries[:50]:
+            if not isinstance(item, dict):
+                continue
+            paper = item.get("paper") if isinstance(item.get("paper"), dict) else {}
+            title = (paper.get("title") or "").strip() if isinstance(paper.get("title"), str) else ""
+            pdf_url = (paper.get("pdf_url") or "").strip() if isinstance(paper.get("pdf_url"), str) else ""
+            if title or pdf_url:
+                lines.append(f"- {title or 'N/A'} ({pdf_url or 'N/A'})")
+        return "\n".join(lines).strip() + "\n"

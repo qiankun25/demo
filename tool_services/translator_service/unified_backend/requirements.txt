@@ -1,0 +1,12 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+pydantic-settings>=2.2
+requests>=2.31
+python-multipart>=0.0.9
+loguru>=0.7
+dashscope
+pymupdf
+opencv-python
+Pillow
+

@@ -1,14 +1,16 @@
 """
 Overview service configuration for SiliconFlow2 (domain survey generation).
 
-注意：根据用户需求，密钥已硬编码。
+注意：
+- 不要在代码里硬编码密钥。
+- 请通过环境变量注入（例如 docker-compose 的 environment / .env 文件）。
 """
 
 import os
 
-SILICONFLOW2_API_KEY = "sk-buicstsfegdrvyvakdtqvwyhydmqwrpldpsyiaocnmftqmca"
-SILICONFLOW2_API_BASE = "https://api.siliconflow.cn/v1/chat/completions"
-SILICONFLOW2_MODEL = "deepseek-ai/DeepSeek-V3"
+SILICONFLOW2_API_KEY = (os.getenv("SILICONFLOW2_API_KEY") or "").strip()
+SILICONFLOW2_API_BASE = (os.getenv("SILICONFLOW2_API_BASE") or "https://api.siliconflow.cn/v1/chat/completions").strip()
+SILICONFLOW2_MODEL = (os.getenv("SILICONFLOW2_MODEL") or "deepseek-ai/DeepSeek-V3").strip()
 
 OVERVIEW_MAX_TOKENS = int(os.getenv("OVERVIEW_MAX_TOKENS", "1200"))
 OVERVIEW_TEMPERATURE = float(os.getenv("OVERVIEW_TEMPERATURE", "0.2"))

@@ -27,7 +27,10 @@ class RabbitConfig:
     
     # 队列定义
     DLQ_QUEUE = "q.nexus.dead_letter"     # 死信队列
-    TTL_MS = 60000                        # 消息超时时间 (60秒)
+    # 命令队列 TTL（毫秒）。
+    # 默认值从 60s 提高到 15min，避免 MORNING_REPORT / SUMMARY_REPORT fan-out 时因 prefetch=1 导致队列等待过久而被 DLQ。
+    # 如需禁用 TTL，可设置 NEXUS_CMD_TTL_MS<=0（BaseToolService 会跳过 x-message-ttl）。
+    TTL_MS = int(os.getenv("NEXUS_CMD_TTL_MS", "900000"))
 
 # 约定的服务路由表，便于各服务/文档统一引用
 SERVICE_ROUTING = {

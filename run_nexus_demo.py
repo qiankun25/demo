@@ -107,20 +107,33 @@ async def main():
             trace_id = await orchestrator.submit_job("MORNING_REPORT", job_data)
             print(f"Job Submitted! Trace ID: {trace_id}")
 
-        # Wait for completion
-        print("\n--- ⏳ Waiting for Workflow Completion ---")
-        # In a real test, we might poll the state manager to check status
-        for _ in range(60): # Wait up to 60*5 = 300 seconds
+        # Wait for completion (poll state in MinIO)
+        print("\n--- ⏳ Waiting for Workflow Completion (polling task:{trace_id}:ctx) ---")
+        for i in range(60):  # Wait up to 60*5 = 300 seconds
             await asyncio.sleep(5)
             try:
-                # Check status if possible (Nexus orchestrator tracks state in MinIO)
-                # But here we just wait like the original demo
-                pass
-            except Exception:
-                pass
+                ctx = await state_manager.get_context(trace_id)
+                if ctx:
+                    print(
+                        f"\n[{i}] stage={ctx.current_stage} "
+                        f"done={len(ctx.completed_work_keys)}/{len(ctx.work_keys)} "
+                        f"fail={len(ctx.failures)}"
+                    )
+                    if ctx.current_stage == "completed":
+                        manifest_key = (ctx.artifacts or {}).get("detailed_manifest")
+                        if manifest_key:
+                            print(f"✅ Completed. detailed_manifest={manifest_key}")
+                        else:
+                            print("✅ Completed.")
+                        break
+                else:
+                    print(f"\n[{i}] ctx not found yet")
+            except Exception as e:
+                print(f"\n[{i}] polling error: {e!r}")
             print(".", end="", flush=True)
-        
-        print("\nTimeout or Finished waiting.")
+
+        else:
+            print("\nTimeout waiting for completion.")
 
     except Exception as e:
         print(f"\n[!!!] Error: {e}")

@@ -2,3 +2,10 @@ httpx==0.28.1
 fastapi==0.115.5
 uvicorn==0.32.1
 pydantic==2.9.2
+pydantic-settings>=2.2
+requests>=2.31
+python-multipart>=0.0.9
+dashscope
+pymupdf
+opencv-python
+Pillow

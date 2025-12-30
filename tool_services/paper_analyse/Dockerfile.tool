@@ -7,6 +7,9 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
+    # OCR fallback deps (for scanned/image PDFs)
+    tesseract-ocr \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy and install Nexus SDK

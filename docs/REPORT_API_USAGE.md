@@ -17,7 +17,11 @@ Content-Type: application/json
   "parameters": {
     "limit": 5,
     "query": "large language model",
-    "filters": {"publication_year": "2024"}
+    "filters": {
+      "publication_year": "2024",
+      "journal": "Nature",
+      "author": "Yann"
+    }
   }
 }
 ```

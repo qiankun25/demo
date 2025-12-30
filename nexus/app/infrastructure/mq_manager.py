@@ -187,7 +187,14 @@ class MQManager:
         # Requirement 3.5: Log the routing key and trace ID
         logger.info(
             f"Published command: routing_key={routing_key}, trace_id={trace_id}",
-            extra={"trace_id": trace_id, "routing_key": routing_key}
+            extra={
+                "trace_id": trace_id,
+                "routing_key": routing_key,
+                "cmd_task_type": task_type,
+                "cmd_task_id": task_id,
+                "cmd_input_key": input_key,
+                "cmd_params_keys": sorted(list((params or {}).keys())),
+            },
         )
         
     async def start_consuming(
@@ -248,7 +255,12 @@ class MQManager:
                     
                     logger.debug(
                         f"Received event: routing_key={routing_key}, trace_id={trace_id}",
-                        extra={"trace_id": trace_id, "routing_key": routing_key}
+                        extra={
+                            "trace_id": trace_id,
+                            "routing_key": routing_key,
+                            "evt_task_type": getattr(message_package.header, "task_type", None),
+                            "evt_sender": getattr(message_package.header, "sender", None),
+                        },
                     )
                     
                     # Process the message with callback

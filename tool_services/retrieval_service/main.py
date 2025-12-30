@@ -76,6 +76,39 @@ class Settings(BaseSettings):
     worker_poll_interval: float = Field(1.0, gt=0)
     max_event_attempts: int = Field(5, ge=1, le=20)
 
+    # Local vector+metadata DB (written by IndexerToolService / indexing_service)
+    # NOTE: This is a local file-based integration. In docker deployment, you must mount the same volumes.
+    index_db_path: str = Field(
+        default_factory=lambda: os.getenv("RETRIEVAL_INDEX_DB_PATH")
+        or os.getenv("INDEX_DB_PATH")
+        or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "indexing_service", "index.db")),
+        description="Indexing SQLite 路径（docs/chunks）。默认指向 ../indexing_service/index.db",
+    )
+    chroma_persist_dir: str = Field(
+        default_factory=lambda: os.getenv("RETRIEVAL_CHROMA_PERSIST_DIR")
+        or os.getenv("INDEX_CHROMA_PERSIST_DIR")
+        or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "indexing_service", "chroma_data")),
+        description="Chroma 持久化目录。默认指向 ../indexing_service/chroma_data",
+    )
+    chroma_collection: str = Field(
+        default_factory=lambda: os.getenv("RETRIEVAL_CHROMA_COLLECTION")
+        or os.getenv("INDEX_CHROMA_COLLECTION")
+        or "paper_chunks",
+        description="Chroma collection 名称（需与 IndexerToolService 一致）",
+    )
+    chroma_distance: str = Field(
+        default_factory=lambda: os.getenv("RETRIEVAL_CHROMA_DISTANCE")
+        or os.getenv("INDEX_CHROMA_DISTANCE")
+        or "cosine",
+        description="Chroma 距离度量（cosine/l2/ip；用于 score 解释）",
+    )
+    embed_dim: int = Field(
+        default_factory=lambda: int(os.getenv("RETRIEVAL_EMBED_DIM") or os.getenv("INDEX_EMBED_DIM") or "256"),
+        ge=32,
+        le=2048,
+        description="Hash embedding 维度（需与 IndexerToolService 一致）",
+    )
+
     class Config:
         env_prefix = "RETRIEVAL_"
         case_sensitive = False
@@ -203,6 +236,30 @@ class KnowledgeBaseOverviewResponse(BaseModel):
     docs: List[KnowledgeBaseOverviewDoc]
 
 
+class SemanticSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, description="语义检索 query")
+    k: int = Field(10, ge=1, le=50, description="返回命中数量")
+    min_score: float = Field(0.0, ge=-1.0, le=1.0, description="最小 score（粗过滤；cosine 下通常 1-dist）")
+
+
+class SemanticSearchHit(BaseModel):
+    score: float
+    chunk_id: str
+    doc_id: str
+    paper: Dict[str, Any]
+    chunk_text: str
+    chunk: Dict[str, Any]
+    doc: Dict[str, Any]
+    vector_meta: Dict[str, Any]
+
+
+class SemanticSearchResponse(BaseModel):
+    query: str
+    k: int
+    hits: List[SemanticSearchHit]
+    meta: Dict[str, Any]
+
+
 @dataclass
 class Event:
     event_id: str
@@ -284,6 +341,107 @@ async def kb_overview(limit: int = 20, offset: int = 0):
             raise HTTPException(status_code=502, detail=f"indexing_service /kb/overview 失败: {resp.status_code} {resp.text[:300]!r}")
         data = resp.json()
     return KnowledgeBaseOverviewResponse(**data)
+
+
+def _connect_index_db() -> sqlite3.Connection:
+    """Connect to indexing SQLite (docs/chunks) written by IndexerToolService."""
+    conn = sqlite3.connect(settings.index_db_path, timeout=30.0, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _tokenize(s: str) -> List[str]:
+    s = (s or "").lower()
+    out: List[str] = []
+    cur: List[str] = []
+    for ch in s:
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
+            cur.append(ch)
+        else:
+            if len(cur) >= 3:
+                out.append("".join(cur))
+            cur = []
+    if len(cur) >= 3:
+        out.append("".join(cur))
+    return out
+
+
+def _hash_embed(text: str, dim: int) -> List[float]:
+    """Hashing embedding: must match IndexerToolService implementation."""
+    try:
+        import numpy as np  # noqa: WPS433
+    except Exception as e:
+        raise RuntimeError("numpy is required for semantic_search. Please pip install -r requirements.txt") from e
+    toks = _tokenize(text)
+    v = np.zeros((dim,), dtype=np.float32)
+    for t in toks:
+        # NOTE: 不要使用 Python 内建 hash()（默认有随机盐，跨进程不稳定）
+        digest = hashlib.sha256(t.encode("utf-8", errors="ignore")).digest()
+        h = int.from_bytes(digest[:8], "little", signed=False)
+        idx = h % dim
+        sign = 1.0 if (h & 1) == 0 else -1.0
+        v[idx] += sign
+    n = float(np.linalg.norm(v))
+    if n > 0:
+        v /= n
+    return v.astype(np.float32).tolist()
+
+
+def _score_from_distance(dist: Any, distance_kind: str) -> float:
+    """Convert Chroma returned distance to a 'higher is better' score."""
+    try:
+        d = float(dist)
+    except Exception:
+        d = 0.0
+    dk = (distance_kind or "cosine").lower().strip()
+    if dk == "ip":
+        # Inner product: larger is better already (Chroma may return negative/positive).
+        return d
+    # cosine/l2: smaller is better -> convert to similarity-like score
+    return 1.0 - d
+
+
+@app.post("/semantic_search", response_model=SemanticSearchResponse)
+async def semantic_search(req: SemanticSearchRequest):
+    """
+    语义检索（统一走 indexing_service 的 API）：
+    - 本服务不再直连 Chroma/index.db，避免多实例部署下的读一致性问题
+    - 保持对外响应结构不变（SemanticSearchResponse）
+    """
+    q = (req.query or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="query 不能为空")
+
+    # Important: use local package import so `uvicorn main:app` works even when
+    # repo root is not on PYTHONPATH (common in local dev).
+    from app.services.semantic_search import semantic_search_via_indexing_service
+
+    try:
+        shaped = await semantic_search_via_indexing_service(
+            indexing_base_url=settings.indexing_base_url,
+            http_timeout=settings.http_timeout,
+            query=q,
+            k=req.k,
+            min_score=req.min_score,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"semantic_search via indexing_service failed: {e}") from e
+
+    hits: List[SemanticSearchHit] = []
+    for h in (shaped.get("hits") or []):
+        if not isinstance(h, dict):
+                continue
+        try:
+            hits.append(SemanticSearchHit(**h))
+            except Exception:
+            continue
+
+    return SemanticSearchResponse(
+        query=shaped.get("query") or req.query,
+        k=int(shaped.get("k") or req.k),
+        hits=hits,
+        meta=shaped.get("meta") or {},
+    )
 
 
 @app.post("/search", response_model=SearchResponse)

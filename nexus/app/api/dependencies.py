@@ -8,6 +8,7 @@ from app.engine.workflows import WorkflowRegistry
 from app.engine.orchestrator import WorkflowOrchestrator
 from app.services.job_service import JobService
 from app.services.status_service import StatusService
+from app.services.report_service import ReportService
 
 # Singletons
 _mq_manager = None
@@ -61,3 +62,8 @@ def get_status_service(
     orchestrator: WorkflowOrchestrator = Depends(get_orchestrator)
 ) -> StatusService:
     return StatusService(orchestrator)
+
+def get_report_service(
+    orchestrator: WorkflowOrchestrator = Depends(get_orchestrator)
+) -> ReportService:
+    return ReportService(orchestrator)

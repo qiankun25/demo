@@ -184,6 +184,10 @@ curl -X POST http://localhost:8000/api/v1/jobs ^
 }
 ```
 
+说明：
+- `artifacts` 的结构是 `{artifact_key: download_url}`。
+- `download_url` 是可直接请求的地址；不要把它 URL-encode 后再塞进 `{artifact_key}`。
+
 - `404 Not Found`（application/json）
 
 ```json
@@ -200,9 +204,129 @@ curl http://localhost:8000/api/v1/jobs/2f4a6df3-4f6e-4e05-8a54-3c01caa6a9b2
 
 ---
 
-#### 3) 获取任务制品（流式下载/透传）
+#### 3) 获取标准化报告（推荐）
+**Method & Path**  
+`GET /api/v1/jobs/{trace_id}/report`
+
+**描述**  
+获取已完成任务的标准化聚合报告。该 API 自动聚合所有相关 artifacts，并转换为统一的业务层数据模型，适合大多数使用场景（80%）。
+
+**路径参数**
+- `trace_id`（string，必填）：任务追踪 ID
+
+**响应**
+- `200 OK`（application/json）
+
+响应格式取决于任务类型：
+
+**MORNING_REPORT 响应格式**（见 [report_models.py](file:///d:/05_python/demo/nexus/app/models/report_models.py)）：
+
+```json
+{
+  "trace_id": "uuid",
+  "task_type": "MORNING_REPORT",
+  "requested_limit": 5,
+  "paper_count": 3,
+  "papers": [
+    {
+      "paper": {
+        "title": "Paper Title",
+        "authors": ["Author 1", "Author 2"],
+        "pdf_url": "http://example.com/paper.pdf",
+        "openalex_id": "W123",
+        "doi": "10.1234/example",
+        "publication_date": "2024-01-01",
+        "original_url": "http://example.com/paper.pdf"
+      },
+      "summary": {
+        "llm_summary": "This is a summary of the paper..."
+      },
+      "index": {
+        "collection": "default",
+        "vector_count": 10,
+        "persist_dir": "/path/to/vectors"
+      },
+      "keys": {
+        "work_key": "task:uuid:work:0",
+        "download_key": "data:download:data:work:task:uuid:work:0",
+        "parse_key": "data:parse:data:download:data:work:task:uuid:work:0",
+        "index_key": "data:index:data:parse:data:download:data:work:task:uuid:work:0"
+      }
+    }
+  ],
+  "failure_count": 0,
+  "failures": [],
+  "keys": {
+    "init_key": "job:uuid:init",
+    "discovery_key": "data:discovery:job:uuid:input"
+  },
+  "input": {
+    "query": "large language model",
+    "filters": {"publication_year": "2024"}
+  }
+}
+```
+
+**SUMMARY_REPORT 响应格式**：
+
+```json
+{
+  "trace_id": "uuid",
+  "task_type": "SUMMARY_REPORT",
+  "overview_md": "# Summary\n\nThis is a summary.",
+  "meta": {
+    "model": "gpt-4",
+    "paper_count": 3,
+    "domain": "AI",
+    "style": "academic"
+  },
+  "paper_count": 3
+}
+```
+
+- `400 Bad Request`（application/json）
+
+```json
+{
+  "detail": "Job {trace_id} is not completed yet (current stage: processing)"
+}
+```
+
+- `404 Not Found`（application/json）
+
+```json
+{
+  "detail": "Job {trace_id} not found"
+}
+```
+
+- `500 Internal Server Error`（application/json）
+
+```json
+{
+  "detail": "Failed to generate report: {error_message}"
+}
+```
+
+**使用建议**
+- **常规场景**（推荐）：使用此 API 获取标准化报告，简单高效
+- **高级场景**（调试、特殊需求）：如需访问原始工具服务数据格式，使用 `GET /api/v1/jobs/{trace_id}/artifacts/{artifact_key}`
+
+**请求示例（curl）**
+
+```bash
+curl http://localhost:8000/api/v1/jobs/2f4a6df3-4f6e-4e05-8a54-3c01caa6a9b2/report
+```
+
+---
+
+#### 4) 获取任务制品（流式下载/透传）
 **Method & Path**  
 `GET /api/v1/jobs/{trace_id}/artifacts/{artifact_key}`
+
+**描述**  
+从存储读取对象流并透传返回（见 [routes.py](file:///d:/05_python/demo/nexus/app/api/routes.py#L59-L85) 与 [status_service.py](file:///d:/05_python/demo/nexus/app/services/status_service.py#L35-L50)）。  
+**注意**：此 API 返回原始工具服务数据格式，适合调试和特殊需求场景。常规使用建议使用 `GET /api/v1/jobs/{trace_id}/report` 获取标准化报告。
 
 **描述**  
 从存储读取对象流并透传返回（见 [routes.py](file:///d:/05_python/demo/nexus/app/api/routes.py#L59-L85) 与 [status_service.py](file:///d:/05_python/demo/nexus/app/services/status_service.py#L35-L50)）。
@@ -248,7 +372,7 @@ curl -L http://localhost:8000/api/v1/jobs/2f4a6df3-4f6e-4e05-8a54-3c01caa6a9b2/a
 
 ---
 
-#### 4) 健康检查
+#### 5) 健康检查
 **Method & Path**  
 `GET /api/v1/health`
 
@@ -272,7 +396,7 @@ curl -L http://localhost:8000/api/v1/jobs/2f4a6df3-4f6e-4e05-8a54-3c01caa6a9b2/a
 
 ---
 
-#### 5) 就绪检查
+#### 6) 就绪检查
 **Method & Path**  
 `GET /api/v1/ready`
 

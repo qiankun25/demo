@@ -196,12 +196,30 @@ class ParserFinishedHandler:
         if payload.status != "SUCCESS":
             return
 
+        # Extract work_key with fallback strategy
         work_key = None
-        if not work_key:
+        
+        # Strategy 1: Try from output_key (Parser returns data:parse:data:work:{wk})
+        if payload.output_key:
             try:
-                work_key = infer_work_key(payload.input_key or "")
+                work_key = infer_work_key(payload.output_key)
+            except ValueError:
+                pass
+        
+        # Strategy 2: Try from input_key (if provided)
+        if not work_key and payload.input_key:
+            try:
+                work_key = infer_work_key(payload.input_key)
             except ValueError:
                 work_key = payload.input_key
+        
+        # Safety check: work_key must not be None
+        if not work_key:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"ParserFinishedHandler: Cannot extract work_key from payload. "
+                        f"output_key={payload.output_key}, input_key={payload.input_key}")
+            return
 
         if context.task_type == "MORNING_REPORT":
              await self.mq.publish_command(
@@ -216,8 +234,10 @@ class ParserFinishedHandler:
             current_ctx = await self.state.get_context(context.trace_id)
             if not current_ctx: return
 
+            # Add work_key to completed set (with None check for safety)
             completed = set(current_ctx.completed_work_keys)
-            completed.add(work_key)
+            if work_key:  # Ensure work_key is not None
+                completed.add(work_key)
             await self.state.update_context(context.trace_id, {"completed_work_keys": list(completed)})
             
             # Check for completion

@@ -7,11 +7,13 @@ from app.models.api_models import (
 )
 from app.services.job_service import JobService
 from app.services.status_service import StatusService
+from app.services.report_service import ReportService
 from app.infrastructure.mq_manager import MQManager
 from app.infrastructure.storage import StorageBackend
 from app.api.dependencies import (
     get_job_service, 
     get_status_service,
+    get_report_service,
     get_mq_manager,
     get_storage
 )
@@ -55,6 +57,34 @@ async def get_job_status(
             detail=f"Job {trace_id} not found"
         )
     return response
+
+@router.get("/jobs/{trace_id}/report")  # 必须在 /artifacts/{artifact_key} 之前定义（FastAPI 路由匹配顺序）
+async def get_job_report(
+    trace_id: str,
+    report_service: ReportService = Depends(get_report_service)
+):
+    """
+    Get a standardized report for a completed job.
+    
+    This endpoint aggregates all artifacts from a job into a unified, standardized format.
+    Supports MORNING_REPORT and SUMMARY_REPORT task types.
+    
+    Returns 404 if job not found, 400 if job is not completed yet.
+    """
+    try:
+        report = await report_service.build_report(trace_id)
+        return report
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate report: {str(e)}"
+        )
+
 
 @router.get(
     "/jobs/{trace_id}/artifacts/{artifact_key}",

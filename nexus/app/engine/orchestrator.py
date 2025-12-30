@@ -79,24 +79,56 @@ class WorkflowOrchestrator:
         
         if task_type == "SUMMARY_REPORT":
             # SUMMARY_REPORT Special Logic: Fan-out on start
-            summary_report_key = params.get("summary_report_key")
-            if not summary_report_key:
-                raise ValueError("SUMMARY_REPORT requires summary_report_key")
+            # Support two modes: direct papers data (new) or summary_report_key (legacy)
+            papers = None
             
-            sr_data = await self.storage.get(summary_report_key)
-            print(f"DEBUG: Orchestrator sr_data type={type(sr_data)} val={sr_data}")
-            if not sr_data:
-                raise ValueError(f"Invalid summary report data at {summary_report_key}")
-                 
-            papers = sr_data.get("papers") or []
+            if "papers" in params:
+                # New mode: Direct papers data in parameters
+                papers = params.get("papers")
+                if not isinstance(papers, list):
+                    raise ValueError("SUMMARY_REPORT 'papers' must be a list")
+                
+                # Validate papers format
+                for i, p in enumerate(papers):
+                    if not isinstance(p, dict):
+                        raise ValueError(f"Paper at index {i} must be a dict")
+                    pdf_url = p.get("pdf_url")
+                    if not pdf_url or not str(pdf_url).strip():
+                        raise ValueError(f"Paper at index {i} must have non-empty 'pdf_url'")
+                
+                # Store input data for audit/logging (optional but recommended)
+                summary_report_key = f"data:summary_report_input:{trace_id}"
+                summary_report_data = {
+                    "papers": papers,
+                    "domain": params.get("domain", ""),
+                    "style": params.get("style", "academic")
+                }
+                await self.storage.put(summary_report_key, summary_report_data)
+                logger.info(f"SUMMARY_REPORT: Stored input data to {summary_report_key}")
+                
+            elif "summary_report_key" in params:
+                # Legacy mode: Read from storage key
+                summary_report_key = params.get("summary_report_key")
+                logger.info(f"SUMMARY_REPORT: Using legacy mode with key {summary_report_key}")
+                
+                sr_data = await self.storage.get(summary_report_key)
+                if not sr_data:
+                    raise ValueError(f"Invalid summary report data at {summary_report_key}")
+                     
+                papers = sr_data.get("papers") or []
+            else:
+                raise ValueError("SUMMARY_REPORT requires either 'papers' or 'summary_report_key' in parameters")
+            
             if not papers:
-                raise ValueError("No papers in summary report")
+                raise ValueError("SUMMARY_REPORT requires at least one paper")
                 
             work_keys = []
             for i, p in enumerate(papers):
-                if not isinstance(p, dict): continue
+                if not isinstance(p, dict):
+                    continue
                 pdf_url = p.get("pdf_url")
-                if not pdf_url: continue
+                if not pdf_url:
+                    continue
                 
                 # Generate key
                 wk = generate_work_key(trace_id, i)
@@ -106,7 +138,7 @@ class WorkflowOrchestrator:
                 paper_input_key = f"data:work:{wk}"
                 await self.storage.put(paper_input_key, {
                     "pdf_url": pdf_url,
-                    "title": p.get("title"),
+                    "title": p.get("title", ""),
                     "authors": p.get("authors") or [],
                     "source_url": pdf_url,
                     "content_type": "application/pdf"

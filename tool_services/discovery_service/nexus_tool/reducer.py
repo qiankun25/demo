@@ -12,6 +12,7 @@ def reduce_work(w: Dict[str, Any]) -> Dict[str, Any]:
     - open_access：含 oa_status/any_repository_has_fulltext 等（若存在）
     - pdf 候选：best_oa_location / locations 的 pdf_url + landing_page_url
     - authors：display_name 列表（用于展示/调试）
+    - venue：期刊/会议名（从 primary_location/best_oa_location 的 source.display_name 提取）
     """
     out: Dict[str, Any] = {
         "id": w.get("id"),
@@ -31,6 +32,25 @@ def reduce_work(w: Dict[str, Any]) -> Dict[str, Any]:
 
     # 提取一个最优 pdf_url 便于 downloader 直接使用
     out["pdf_url"] = _first_pdf_url(out)
+
+    # 提取期刊/会议名（venue/display_name）
+    # 优先级：primary_location.source.display_name > best_oa_location.source.display_name
+    venue_display_name = None
+    primary_loc = out.get("primary_location")
+    if isinstance(primary_loc, dict):
+        source = primary_loc.get("source")
+        if isinstance(source, dict):
+            venue_display_name = source.get("display_name")
+    
+    if not venue_display_name:
+        best_oa_loc = out.get("best_oa_location")
+        if isinstance(best_oa_loc, dict):
+            source = best_oa_loc.get("source")
+            if isinstance(source, dict):
+                venue_display_name = source.get("display_name")
+    
+    if venue_display_name:
+        out["venue_display_name"] = venue_display_name
 
     # 清理 None
     return {k: v for k, v in out.items() if v is not None}

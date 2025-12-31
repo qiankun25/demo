@@ -5,18 +5,32 @@
 使用新的统一报告 API
 
 用法:
+    python tests/test_nexus_api.py [--host HOST] [--port PORT]
+
+示例:
+    # 测试本地服务
     python tests/test_nexus_api.py
+    
+    # 测试云服务器
+    python tests/test_nexus_api.py --host 8.134.183.68
 """
 
 import requests
 import time
 import json
+import argparse
+import sys
 from typing import Dict, Any
 
-# 配置
-NEXUS_URL = "http://localhost:8000/api/v1"
+# 默认配置
+DEFAULT_HOST = "localhost"
+DEFAULT_PORT = 8000
+NEXUS_API_PATH = "/api/v1"
 POLL_INTERVAL = 5  # 轮询间隔（秒）
 MAX_WAIT_TIME = 600  # 最大等待时间（秒），10分钟
+
+# 全局变量，由 main 函数初始化
+NEXUS_URL = ""
 
 
 def submit_job(task_type: str, parameters: Dict[str, Any]) -> str:
@@ -188,10 +202,10 @@ def test_morning_report():
         trace_id = submit_job(
             "MORNING_REPORT",
             {
-                "limit": 3,
-                "query": "large language model",
+                "limit": 10,
+                "query": "deep learning",
                 "filters": {
-                    "publication_year": "2024"
+                    "publication_year": "2025"
                 }
             }
         )
@@ -268,6 +282,14 @@ def test_summary_report():
 
 def main():
     """主函数"""
+    parser = argparse.ArgumentParser(description="Nexus API 测试脚本")
+    parser.add_argument("--host", default=DEFAULT_HOST, help=f"服务器地址 (默认: {DEFAULT_HOST})")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"服务器端口 (默认: {DEFAULT_PORT})")
+    args = parser.parse_args()
+
+    global NEXUS_URL
+    NEXUS_URL = f"http://{args.host}:{args.port}{NEXUS_API_PATH}"
+
     print("\n" + "="*80)
     print("Nexus API 测试脚本")
     print("="*80)

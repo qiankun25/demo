@@ -22,6 +22,101 @@ class DiscoveryFinishedHandler:
         self.state = state
         self.settings = get_settings()
 
+    async def _generate_preliminary_report(
+        self, 
+        context: JobContext, 
+        valid_works: List[Dict[str, Any]], 
+        work_keys: List[str],
+        discovery_key: str
+    ) -> None:
+        """
+        Generate preliminary report immediately after discovery, before download/parse/index.
+        This allows users to see results faster, with llm_summary to be filled in later.
+        Note: valid_works are already reduced works from reducer.py (discovery_service output).
+        """
+        try:
+            # Get init payload for input info
+            init_payload = None
+            if context.init_key:
+                try:
+                    init_payload = await self.storage.get(context.init_key)
+                except Exception:
+                    pass
+
+            # Extract input information
+            input_info = {}
+            if isinstance(init_payload, dict):
+                input_info["query"] = init_payload.get("query")
+                input_info["filters"] = init_payload.get("filters")
+
+            # Build preliminary papers from discovery results
+            # valid_works are already reduced works from reducer.py
+            preliminary_papers = []
+            for work, work_key in zip(valid_works, work_keys):
+                if not isinstance(work, dict):
+                    continue
+                    
+                # Extract metadata from reduced work (from reducer.py)
+                paper_meta = {
+                    "title": work.get("title") or "Unknown",
+                    "authors": work.get("authors") or [],
+                    "publication_year": work.get("publication_year"),
+                    "publication_date": work.get("publication_date"),
+                    "cited_by_count": work.get("cited_by_count"),
+                    "venue_display_name": work.get("venue_display_name"),
+                    "openalex_id": work.get("id"),
+                    "doi": work.get("doi"),
+                    "pdf_url": work.get("pdf_url"),
+                }
+
+                # Create preliminary paper report (llm_summary will be empty initially)
+                preliminary_papers.append({
+                    "work_key": work_key,
+                    "paper": paper_meta,
+                    "summary": {"llm_summary": ""},  # Will be filled in by ParserFinishedHandler
+                    "index": {"collection": None, "vector_count": None, "persist_dir": None},
+                    "keys": {
+                        "work_key": work_key,
+                        "download_key": None,  # Will be filled in later
+                        "parse_key": None,
+                        "index_key": None,
+                    }
+                })
+
+            # Create preliminary report
+            preliminary_report = {
+                "trace_id": context.trace_id,
+                "task_type": "MORNING_REPORT",
+                "requested_limit": context.requested_limit,
+                "paper_count": len(preliminary_papers),
+                "papers": preliminary_papers,
+                "failure_count": 0,
+                "failures": [],
+                "keys": {
+                    "init_key": context.init_key,
+                    "discovery_key": discovery_key,
+                },
+                "input": input_info,
+                "_is_preliminary": True,  # Flag to indicate this is a preliminary report
+            }
+
+            # Store preliminary report
+            preliminary_report_key = f"data:preliminary_report:{context.trace_id}"
+            await self.storage.put(preliminary_report_key, preliminary_report)
+            
+            # Update context to include preliminary report key
+            def update_ctx_with_preliminary(ctx: JobContext) -> Dict[str, Any]:
+                artifacts = ctx.artifacts.copy()
+                artifacts["preliminary_report"] = preliminary_report_key
+                return {"artifacts": artifacts}
+            
+            await self.state.atomic_update_context(context.trace_id, update_ctx_with_preliminary)
+            logger.info(f"Generated preliminary report for {context.trace_id} with {len(preliminary_papers)} papers")
+            
+        except Exception as e:
+            logger.error(f"Failed to generate preliminary report for {context.trace_id}: {e}", exc_info=True)
+            # Don't fail the whole process if preliminary report generation fails
+
     async def _publish_single_download_command(
         self, 
         work: Dict[str, Any], 
@@ -163,6 +258,10 @@ class DiscoveryFinishedHandler:
                 f"trace_id={context.trace_id}. These tasks will not be processed."
             )
 
+        # Generate preliminary report immediately after discovery (optimization)
+        if context.task_type == "MORNING_REPORT":
+            await self._generate_preliminary_report(context, valid_works, work_keys, payload.output_key)
+
 class DownloaderFinishedHandler:
     def __init__(self, mq: MQManager):
         self.mq = mq
@@ -190,6 +289,65 @@ class ParserFinishedHandler:
         self.mq = mq
         self.state = state
         self.storage = storage
+
+    async def _update_preliminary_report_with_summary(
+        self, 
+        trace_id: str, 
+        work_key: str, 
+        parse_output_key: str
+    ) -> None:
+        """
+        Update preliminary report with llm_summary from parse result.
+        This allows users to see summaries as soon as parsing completes.
+        """
+        try:
+            # Get parse payload to extract llm_summary
+            parse_payload = await self.storage.get(parse_output_key)
+            if not isinstance(parse_payload, dict):
+                return
+
+            llm_summary = parse_payload.get("llm_summary") or ""
+
+            # Get preliminary report
+            preliminary_report_key = f"data:preliminary_report:{trace_id}"
+            preliminary_report = await self.storage.get(preliminary_report_key)
+            
+            if not isinstance(preliminary_report, dict):
+                # Preliminary report doesn't exist yet, skip update
+                return
+
+            # Find the paper with matching work_key and update its summary
+            papers = preliminary_report.get("papers", [])
+            updated = False
+            for paper in papers:
+                if isinstance(paper, dict) and paper.get("work_key") == work_key:
+                    if "summary" not in paper:
+                        paper["summary"] = {}
+                    paper["summary"]["llm_summary"] = llm_summary
+                    updated = True
+                    break
+
+            if updated:
+                # Also update download_key and parse_key if available
+                for paper in papers:
+                    if isinstance(paper, dict) and paper.get("work_key") == work_key:
+                        keys = paper.get("keys", {})
+                        if not keys.get("download_key"):
+                            # Try to infer download key
+                            work_in_key = f"data:work:{work_key}"
+                            download_key = f"data:download:{work_in_key}"
+                            keys["download_key"] = download_key
+                        if not keys.get("parse_key"):
+                            keys["parse_key"] = parse_output_key
+                        break
+
+                # Save updated preliminary report
+                await self.storage.put(preliminary_report_key, preliminary_report)
+                logger.debug(f"Updated preliminary report for {trace_id}, work_key={work_key} with summary")
+                
+        except Exception as e:
+            logger.warning(f"Failed to update preliminary report with summary for {trace_id}, work_key={work_key}: {e}")
+            # Don't fail the whole process if update fails
 
     async def handle(self, message: MessagePackage, context: JobContext) -> None:
         payload = EventPayload(**message.payload)
@@ -222,7 +380,10 @@ class ParserFinishedHandler:
             return
 
         if context.task_type == "MORNING_REPORT":
-             await self.mq.publish_command(
+            # Update preliminary report with llm_summary if it exists
+            await self._update_preliminary_report_with_summary(context.trace_id, work_key, payload.output_key)
+            
+            await self.mq.publish_command(
                 routing_key="cmd.indexer.start",
                 trace_id=context.trace_id,
                 task_type="indexer",
@@ -297,6 +458,46 @@ class IndexerFinishedHandler:
         self.state = state
         self.storage = storage
 
+    async def _cleanup_preliminary_report(self, trace_id: str, completed_work_keys: set) -> None:
+        """
+        Clean up preliminary report by removing papers that don't have parse results.
+        This ensures only successfully parsed papers remain in the final report.
+        """
+        try:
+            preliminary_report_key = f"data:preliminary_report:{trace_id}"
+            preliminary_report = await self.storage.get(preliminary_report_key)
+            
+            if not isinstance(preliminary_report, dict):
+                return
+
+            papers = preliminary_report.get("papers", [])
+            # Filter out papers that are not in completed_work_keys or don't have parse_key
+            filtered_papers = []
+            for paper in papers:
+                if not isinstance(paper, dict):
+                    continue
+                work_key = paper.get("work_key")
+                if work_key in completed_work_keys:
+                    # Check if parse_key exists (indicating successful parse)
+                    keys = paper.get("keys", {})
+                    if keys.get("parse_key"):
+                        filtered_papers.append(paper)
+                    else:
+                        logger.debug(f"Removing paper {work_key} from preliminary report: no parse_key")
+                else:
+                    logger.debug(f"Removing paper {work_key} from preliminary report: not in completed set")
+
+            preliminary_report["papers"] = filtered_papers
+            preliminary_report["paper_count"] = len(filtered_papers)
+            
+            # Save updated preliminary report
+            await self.storage.put(preliminary_report_key, preliminary_report)
+            logger.info(f"Cleaned up preliminary report for {trace_id}: {len(papers)} -> {len(filtered_papers)} papers")
+            
+        except Exception as e:
+            logger.warning(f"Failed to cleanup preliminary report for {trace_id}: {e}")
+            # Don't fail the whole process if cleanup fails
+
     async def handle(self, message: MessagePackage, context: JobContext) -> None:
         payload = EventPayload(**message.payload)
         if payload.status != "SUCCESS":
@@ -346,6 +547,9 @@ class IndexerFinishedHandler:
                 manifest_key = f"data:manifest:{context.trace_id}"
                 await self.storage.put(manifest_key, manifest)
                 logger.info(f"Generated manifest for {context.trace_id}")
+
+                # Clean up preliminary report: remove papers that don't have parse results
+                await self._cleanup_preliminary_report(context.trace_id, completed)
 
                 # Atomic update status and artifacts
                 def update_status_and_artifacts(ctx: JobContext) -> Dict[str, Any]:

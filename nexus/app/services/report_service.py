@@ -51,6 +51,15 @@ class ReportService:
             if not context:
                 raise ValueError(f"Job {trace_id} not found")
 
+        # Check if preliminary report exists (for faster response)
+        preliminary_report_key = context.artifacts.get("preliminary_report")
+        preliminary_report = None
+        if preliminary_report_key:
+            try:
+                preliminary_report = await self.storage.get(preliminary_report_key)
+            except Exception as e:
+                logger.warning(f"Failed to get preliminary report from {preliminary_report_key}: {e}")
+
         # Get discovery results if available
         discovery_data = None
         discovery_key = context.artifacts.get("search_results")
@@ -81,36 +90,80 @@ class ReportService:
         papers = []
         completed_work_keys = context.completed_work_keys or []
 
-        # Build papers from manifest if available, otherwise reconstruct from work_keys
-        if manifest and isinstance(manifest, list):
-            # Use manifest to get paper data
-            for item in manifest:
-                if not isinstance(item, dict):
-                    continue
+        # If preliminary report exists and job is completed, merge preliminary data with final data
+        if preliminary_report and isinstance(preliminary_report, dict) and context.current_stage == "completed":
+            # Use preliminary report as base, but update with final data from manifest
+            preliminary_papers = preliminary_report.get("papers", [])
+            preliminary_papers_dict = {p.get("work_key"): p for p in preliminary_papers if isinstance(p, dict)}
+            
+            # Build papers from manifest if available, otherwise reconstruct from work_keys
+            if manifest and isinstance(manifest, list):
+                # Use manifest to get paper data
+                for item in manifest:
+                    if not isinstance(item, dict):
+                        continue
 
-                work_key = item.get("work_key")
-                if not work_key or work_key not in completed_work_keys:
-                    continue
+                    work_key = item.get("work_key")
+                    if not work_key or work_key not in completed_work_keys:
+                        continue
 
-                paper_report = await self._build_paper_from_keys(
-                    work_key, item.get("download_key"), item.get("parse_key"), item.get("index_key")
-                )
-                if paper_report:
-                    papers.append(paper_report)
+                    # Try to get preliminary data first
+                    prelim_paper = preliminary_papers_dict.get(work_key)
+                    paper_report = await self._build_paper_from_keys(
+                        work_key, item.get("download_key"), item.get("parse_key"), item.get("index_key"),
+                        prelim_paper_data=prelim_paper
+                    )
+                    if paper_report:
+                        papers.append(paper_report)
+            else:
+                # Fallback: reconstruct keys from work_keys
+                for work_key in completed_work_keys:
+                    if not work_key:
+                        continue
+
+                    work_in_key = f"data:work:{work_key}"
+                    download_key = f"data:download:{work_in_key}"
+                    parse_key = f"data:parse:{download_key}"
+                    index_key = f"data:index:{parse_key}"
+
+                    prelim_paper = preliminary_papers_dict.get(work_key)
+                    paper_report = await self._build_paper_from_keys(
+                        work_key, download_key, parse_key, index_key,
+                        prelim_paper_data=prelim_paper
+                    )
+                    if paper_report:
+                        papers.append(paper_report)
         else:
-            # Fallback: reconstruct keys from work_keys (same logic as handlers)
-            for work_key in completed_work_keys:
-                if not work_key:
-                    continue
+            # No preliminary report or job not completed, use original logic
+            if manifest and isinstance(manifest, list):
+                # Use manifest to get paper data
+                for item in manifest:
+                    if not isinstance(item, dict):
+                        continue
 
-                work_in_key = f"data:work:{work_key}"
-                download_key = f"data:download:{work_in_key}"
-                parse_key = f"data:parse:{download_key}"
-                index_key = f"data:index:{parse_key}"
+                    work_key = item.get("work_key")
+                    if not work_key or work_key not in completed_work_keys:
+                        continue
 
-                paper_report = await self._build_paper_from_keys(work_key, download_key, parse_key, index_key)
-                if paper_report:
-                    papers.append(paper_report)
+                    paper_report = await self._build_paper_from_keys(
+                        work_key, item.get("download_key"), item.get("parse_key"), item.get("index_key")
+                    )
+                    if paper_report:
+                        papers.append(paper_report)
+            else:
+                # Fallback: reconstruct keys from work_keys (same logic as handlers)
+                for work_key in completed_work_keys:
+                    if not work_key:
+                        continue
+
+                    work_in_key = f"data:work:{work_key}"
+                    download_key = f"data:download:{work_in_key}"
+                    parse_key = f"data:parse:{download_key}"
+                    index_key = f"data:index:{parse_key}"
+
+                    paper_report = await self._build_paper_from_keys(work_key, download_key, parse_key, index_key)
+                    if paper_report:
+                        papers.append(paper_report)
 
         # Convert failures to FailureInfo
         failure_infos = []
@@ -154,7 +207,12 @@ class ReportService:
         )
 
     async def _build_paper_from_keys(
-        self, work_key: str, download_key: Optional[str], parse_key: Optional[str], index_key: Optional[str]
+        self, 
+        work_key: str, 
+        download_key: Optional[str], 
+        parse_key: Optional[str], 
+        index_key: Optional[str],
+        prelim_paper_data: Optional[Dict[str, Any]] = None
     ) -> Optional[PaperReport]:
         """Build a PaperReport from storage keys"""
         try:
@@ -234,10 +292,45 @@ class ReportService:
             openalex_id = None
             doi = None
             publication_date = None
+            publication_year = None
+            cited_by_count = None
+            venue_display_name = None
+            
             if isinstance(work_info, dict):
                 openalex_id = work_info.get("openalex_id") or work_info.get("id")
                 doi = work_info.get("doi")
                 publication_date = work_info.get("publication_date")
+                publication_year = work_info.get("publication_year")
+                cited_by_count = work_info.get("cited_by_count")
+                venue_display_name = work_info.get("venue_display_name")
+
+            # Use preliminary paper data if available (for fields that might not be in download/parse payloads)
+            if prelim_paper_data:
+                prelim_paper = prelim_paper_data.get("paper", {})
+                if isinstance(prelim_paper, dict):
+                    if not title or title == "Unknown":
+                        title = prelim_paper.get("title") or title
+                    if not authors:
+                        authors = prelim_paper.get("authors") or authors
+                    if not publication_year:
+                        publication_year = prelim_paper.get("publication_year") or publication_year
+                    if not publication_date:
+                        publication_date = prelim_paper.get("publication_date") or publication_date
+                    if not cited_by_count:
+                        cited_by_count = prelim_paper.get("cited_by_count") or cited_by_count
+                    if not venue_display_name:
+                        venue_display_name = prelim_paper.get("venue_display_name") or venue_display_name
+                    if not openalex_id:
+                        openalex_id = prelim_paper.get("openalex_id") or openalex_id
+                    if not doi:
+                        doi = prelim_paper.get("doi") or doi
+                    if not pdf_url:
+                        pdf_url = prelim_paper.get("pdf_url") or pdf_url
+                
+                # Update summary from preliminary if parse didn't provide one
+                prelim_summary = prelim_paper_data.get("summary", {})
+                if isinstance(prelim_summary, dict) and not llm_summary:
+                    llm_summary = prelim_summary.get("llm_summary") or llm_summary
 
             return PaperReport(
                 paper=PaperMetadata(
@@ -247,6 +340,9 @@ class ReportService:
                     openalex_id=openalex_id,
                     doi=doi,
                     publication_date=publication_date,
+                    publication_year=publication_year,
+                    cited_by_count=cited_by_count,
+                    venue_display_name=venue_display_name,
                     original_url=original_url,
                 ),
                 summary=PaperSummary(llm_summary=llm_summary),

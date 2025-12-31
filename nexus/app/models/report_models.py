@@ -12,6 +12,9 @@ class PaperMetadata(BaseModel):
     openalex_id: Optional[str] = None
     doi: Optional[str] = None
     publication_date: Optional[str] = None
+    publication_year: Optional[int] = None
+    cited_by_count: Optional[int] = None
+    venue_display_name: Optional[str] = None  # 期刊/会议名
     original_url: Optional[str] = None
 
 
@@ -79,5 +82,7 @@ class ReportResponse(BaseModel):
     trace_id: str
     task_type: str
     data: Dict[str, Any]  # Task-specific report data
+
+
 
 

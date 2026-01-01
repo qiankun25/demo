@@ -4,6 +4,7 @@ import json
 import time
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
+import httpx
 
 def _repo_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -21,7 +22,6 @@ def _ensure_nexus_sdk_on_path() -> None:
 _ensure_nexus_sdk_on_path()
 
 from nexus_sdk.base import BaseToolService
-from nexus_sdk.common import MockStorage
 
 # Import app components
 # We need to make sure the app directory is in the path or use absolute imports
@@ -36,8 +36,7 @@ import chromadb
 class IndexerToolService(BaseToolService):
     def __init__(self):
         super().__init__(service_name="indexer", cmd_routing_key="cmd.indexer.start")
-        # Ensure tables exist
-        Base.metadata.create_all(bind=engine)
+        # NOTE: ref-only + migrations mode: DB schema should be created by Alembic job, not at runtime.
         
         # Initialize Chroma
         os.makedirs(settings.CHROMA_PERSIST_DIR, exist_ok=True)
@@ -48,10 +47,21 @@ class IndexerToolService(BaseToolService):
         )
         self.indexer_service = IndexerService(self.chroma_client, self.collection)
 
-    async def do_work(self, input_key: str, params: dict) -> str:
-        payload = await MockStorage.get(input_key)
-        if not payload:
-            raise ValueError(f"input_key={input_key} not found in storage")
+    async def do_work(self, input_ref: dict, params: dict) -> tuple[dict, dict]:
+        async def _fetch_parsed_via_parser_service(doc_id: str) -> Dict[str, Any]:
+            base = os.getenv("INDEX_PARSER_BASE_URL", "http://localhost:8031").rstrip("/")
+            url = f"{base}/v1/parsed/{doc_id}"
+            async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+                data = r.json()
+            if not isinstance(data, dict) or not isinstance(data.get("data"), dict):
+                raise ValueError("parser_service returned invalid shape")
+            return data["data"]
+
+        if not isinstance(input_ref, dict) or input_ref.get("type") != "parsed_doc" or not input_ref.get("id"):
+            raise ValueError("ref-only: cmd.indexer.start requires input_ref.type=parsed_doc with id")
+        payload = await _fetch_parsed_via_parser_service(str(input_ref["id"]))
 
         doc_id = payload.get("doc_id")
         title = payload.get("title")
@@ -61,43 +71,34 @@ class IndexerToolService(BaseToolService):
         if not doc_id or not chunks_data:
             raise ValueError("doc_id or chunks missing for indexing")
 
-        # Build doc info (replicating original logic but cleaner)
-        download_key = input_key[len("data:parse:"):] if input_key.startswith("data:parse:") else None
-        download_payload = {}
-        if download_key:
-            dp = await MockStorage.get(download_key)
-            if isinstance(dp, dict):
-                download_payload = dp
-
-        work = download_payload.get("work", {})
-        doc_title = (work.get("title") or title or "").strip()
-        authors = work.get("authors") or []
-
-        canonical_id = (work.get("openalex_id") or work.get("id") or "").strip()
-        doi = (work.get("doi") or "").strip()
-        if not canonical_id and doi:
-            canonical_id = f"doi:{doi}"
-        
-        pdf_url = (download_payload.get("pdf_url") or download_payload.get("source_url") or "").strip()
-        if not canonical_id and pdf_url:
-            canonical_id = pdf_url
+        # Metadata is provided via params (kept by orchestrator from discovery fan-out).
+        paper = (params or {}).get("paper") or {}
+        if not isinstance(paper, dict):
+            paper = {}
+        doc_title = str(paper.get("title") or title or "").strip()
+        authors = paper.get("authors") or []
+        if not isinstance(authors, list):
+            authors = []
+        canonical_id = str(paper.get("canonical_id") or paper.get("openalex_id") or paper.get("id") or "").strip()
+        pdf_url = str(paper.get("pdf_url") or "").strip()
+        doi = str(paper.get("doi") or "").strip()
 
         year = None
-        pub_date = (work.get("publication_date") or "").strip()
+        pub_date = str(paper.get("publication_date") or "").strip()
         if pub_date and len(pub_date) >= 4:
             try:
                 year = int(pub_date[:4])
             except:
                 pass
 
-        pdf_object_key = (download_payload.get("pdf_storage_key") or download_payload.get("file_path") or "").strip()
+        pdf_object_key = ""
 
         extra = {
             "pdf_url": pdf_url,
-            "source_url": (download_payload.get("source_url") or "").strip(),
+            "source_url": pdf_url,
             "doi": doi,
             "publication_date": pub_date,
-            "openalex_id": (work.get("openalex_id") or work.get("id") or "").strip(),
+            "openalex_id": canonical_id,
         }
 
         # Prepare IndexRequest
@@ -133,15 +134,8 @@ class IndexerToolService(BaseToolService):
         finally:
             db.close()
 
-        output_key = f"data:index:{input_key}"
-        await MockStorage.save(
-            output_key,
-            {
-                "doc_id": doc_id,
-                "chunk_count": len(chunks_in),
-                "vector_count": len(chunks_in),
-                "collection": settings.CHROMA_COLLECTION,
-                "persist_dir": settings.CHROMA_PERSIST_DIR,
-            },
+        # Result ref: the doc_id is the stable identifier for indexing outputs
+        return (
+            {"service": "indexing", "type": "index_record", "id": str(doc_id), "version": "v1"},
+            {"chunk_count": len(chunks_in), "collection": settings.CHROMA_COLLECTION},
         )
-        return output_key

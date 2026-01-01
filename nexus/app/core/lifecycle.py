@@ -2,7 +2,14 @@ import asyncio
 import logging
 from typing import Callable, Awaitable
 from fastapi import FastAPI
-from app.api.dependencies import get_mq_manager, get_settings, get_storage, get_state_manager, get_workflow_registry
+from app.api.dependencies import (
+    get_mq_manager,
+    get_settings,
+    get_storage,
+    get_state_manager,
+    get_workflow_registry,
+    get_orchestration_db,
+)
 from app.engine.orchestrator import WorkflowOrchestrator
 from app.core.logging import setup_logging
 
@@ -20,7 +27,8 @@ def create_start_app_handler(app: FastAPI) -> Callable[[], Awaitable[None]]:
             await mq_manager.connect()
             
             storage = await get_storage(settings)
-            state_manager = get_state_manager(storage)
+            _db = await get_orchestration_db(settings)
+            state_manager = get_state_manager(_db)
             
             # Ensure workflow registry loaded
             registry = get_workflow_registry(settings)
@@ -51,6 +59,12 @@ def create_stop_app_handler(app: FastAPI) -> Callable[[], Awaitable[None]]:
             mq_manager = await get_mq_manager(settings)
             if mq_manager:
                 await mq_manager.disconnect()
+            # Best-effort dispose DB engine (optional)
+            try:
+                db = await get_orchestration_db(settings)
+                db.engine.dispose()
+            except Exception:
+                pass
                 
             logger.info("Application shutdown complete")
         except Exception as e:

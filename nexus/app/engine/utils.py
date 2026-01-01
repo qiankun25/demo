@@ -3,8 +3,8 @@ from typing import Dict, Any, Optional
 
 def infer_work_key(key: str) -> str:
     """
-    Infers the original work key from various downstream key formats.
-    Recursively strips prefixes until the core work key is found.
+    Ref-only: work_key is an explicit field in messages, so we only accept the
+    canonical work key format.
     
     Args:
         key: The key string to parse.
@@ -18,33 +18,12 @@ def infer_work_key(key: str) -> str:
     if not key:
         raise ValueError("Key cannot be empty")
         
-    current = key
-    # List of known prefixes to strip
-    # Note: "data:parsed:" is legacy/typo, "data:parse:" is actual tool output
-    prefixes = [
-        "data:index:", "index:vector:", 
-        "data:parse:", "data:parsed:", 
-        "data:download:", 
-        "data:work:"
-    ]
-    
-    # Recursively strip prefixes
-    while True:
-        changed = False
-        for prefix in prefixes:
-            if current.startswith(prefix):
-                current = current[len(prefix):]
-                changed = True
-                break
-        if not changed:
-            break
-            
     # Pattern: Direct work key (task:{trace_id}:work:{index})
-    if re.match(r"^task:.+:work:.+$", current):
-        return current
+    if re.match(r"^task:.+:work:.+$", key):
+        return key
         
     # Special case: if key is just the index/id? No, we expect strict format.
-    raise ValueError(f"Unrecognized key format: {key} (reduced to {current})")
+    raise ValueError(f"Unrecognized key format: {key}")
 
 def work_has_pdf_candidate(work_item: Dict[str, Any]) -> bool:
     """

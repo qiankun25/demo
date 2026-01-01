@@ -87,10 +87,12 @@ class DownloaderToolService(BaseToolService):
     def __init__(self):
         super().__init__(service_name="downloader", cmd_routing_key="cmd.downloader.start")
 
-    async def do_work(self, input_key: str, params: dict) -> str:
-        task_data = await MockStorage.get(input_key)
-        if not task_data:
-            raise ValueError(f"input_key={input_key} not found in storage")
+    async def do_work(self, input_ref: dict, params: dict) -> tuple[dict, dict]:
+        # Deprecated in ref-only mode. Use `tool_services/download_service/app/mq_worker.py` instead.
+        raise RuntimeError(
+            "DownloaderToolService (nexus_tool) is deprecated in ref-only mode; "
+            "use download-service mq_worker (cmd.downloader.start -> evt.downloader.finished file_ref)."
+        )
 
         # 支持两种输入：
         # 1) 旧：{"urls":[...]}

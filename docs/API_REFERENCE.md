@@ -620,3 +620,35 @@ curl -X POST "http://localhost:8020/search" \
   }'
 ```
 
+---
+
+## 4. Strict Microservices Query APIs（新增）
+
+这些接口用于“claim-check ref + Query API”模式下的跨服务读取（编排/报告聚合使用）。\n
+### 4.1 Discovery Service Query API
+
+- `GET /v1/results/{result_id}`\n
+返回：
+
+```json
+{ "result_id": "sr_xxx", "data": { "results": [/* ... */] } }
+```
+
+### 4.2 Download Service File Signed URL
+
+- `GET /files/{file_id}/signed_url?expires=3600`\n
+返回：
+
+```json
+{ "file_id": "uuid", "url": "https://...presigned...", "expires_seconds": 3600 }
+```
+
+### 4.3 Parser Service Parsed Query API
+
+- `GET /v1/parsed/{doc_id}`\n
+返回：
+
+```json
+{ "doc_id": "xxx", "data": { "doc_id": "xxx", "chunks": [/* ... */] } }
+```
+

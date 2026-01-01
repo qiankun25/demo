@@ -43,6 +43,8 @@ RUN useradd -m -u 1000 appuser && \
 
 # Copy application code
 COPY --chown=appuser:appuser app/ ./app/
+COPY --chown=appuser:appuser alembic.ini ./alembic.ini
+COPY --chown=appuser:appuser migrations/ ./migrations/
 
 # Switch to non-root user
 USER appuser

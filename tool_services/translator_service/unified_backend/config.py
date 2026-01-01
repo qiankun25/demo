@@ -46,9 +46,9 @@ class Settings(BaseSettings):
     SILICONFLOW_API_BASE: str = os.getenv("SILICONFLOW_API_BASE", "") or _legacy["api_base"]
     SILICONFLOW_MODEL: str = os.getenv("SILICONFLOW_MODEL", "") or _legacy["model"]
     
-    # 百度图片翻译配置（建议通过环境变量注入；此处保留默认值以兼容旧逻辑）
-    BAIDU_APP_ID: str = os.getenv("BAIDU_APP_ID", "20251210002516271")
-    BAIDU_SECRET_KEY: str = os.getenv("BAIDU_SECRET_KEY", "H6gn6L1uEQgSkDq8f13G")
+    # 百度图片翻译配置（只通过环境变量注入；不要在仓库里写死真实凭证）
+    BAIDU_APP_ID: str = os.getenv("BAIDU_APP_ID", "")
+    BAIDU_SECRET_KEY: str = os.getenv("BAIDU_SECRET_KEY", "")
     
     # 临时文件目录
     TMP_DIR: str = "./temp"

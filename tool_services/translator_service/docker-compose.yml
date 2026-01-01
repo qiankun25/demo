@@ -1,0 +1,101 @@
+version: "3.8"
+
+services:
+  translator-go:
+    build:
+      context: ../..
+      dockerfile: tool_services/translator_service/Dockerfile.go
+    ports:
+      - "8002:8002"
+    environment:
+      PORT: 8002
+      DB_HOST: db_translator
+      DB_PORT: 5432
+      DB_NAME: translator
+      DB_USER: translator_user
+      DB_PASSWORD: translator_pass
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
+      SILICONFLOW_API_BASE: ${SILICONFLOW_API_BASE:-https://api.siliconflow.cn/v1/chat/completions}
+      SILICONFLOW_MODEL: ${SILICONFLOW_MODEL:-deepseek-ai/DeepSeek-V3}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      BAIDU_APP_ID: ${BAIDU_APP_ID:-}
+      BAIDU_SECRET_KEY: ${BAIDU_SECRET_KEY:-}
+    depends_on:
+      - db_translator
+      - redis
+      - minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  translator-worker:
+    build:
+      context: ../..
+      dockerfile: tool_services/translator_service/Dockerfile.go
+    command: ["./worker"]
+    environment:
+      DB_HOST: db_translator
+      DB_PORT: 5432
+      DB_NAME: translator
+      DB_USER: translator_user
+      DB_PASSWORD: translator_pass
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+    depends_on:
+      - db_translator
+      - redis
+
+  translator-python:
+    build:
+      context: ../..
+      dockerfile: tool_services/translator_service/Dockerfile.python
+    environment:
+      GO_SERVICE_URL: http://translator-go:8002
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+    depends_on:
+      - translator-go
+      - rabbitmq
+      - minio
+
+  db_translator:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: translator
+      POSTGRES_USER: translator_user
+      POSTGRES_PASSWORD: translator_pass
+    ports:
+      - "5436:5432"
+    volumes:
+      - translator_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U translator_user -d translator"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  translator_db_data:

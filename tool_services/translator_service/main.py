@@ -3,10 +3,12 @@ import sys
 import json
 import base64
 import mimetypes
+import time
 from typing import List, Dict, Any, Optional, Tuple
 
 import httpx
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # Ensure we can import from the current directory
@@ -235,7 +237,43 @@ async def _translate_multimodal(text: str, images: List[str], target_lang: str) 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    ready = await health_ready()
+    code = ready.status_code
+    payload = ready.body
+    try:
+        shaped = json.loads(payload.decode("utf-8"))
+    except Exception:
+        shaped = {"status": "unknown", "raw": str(payload)}
+    shaped.setdefault("service", "translator_service")
+    shaped.setdefault("timestamp", time.time())
+    return JSONResponse(status_code=code, content=shaped)
+
+
+@app.get("/health/live")
+async def health_live():
+    return {"status": "alive"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    components: Dict[str, Any] = {}
+    ok = True
+
+    # External credentials presence checks (no network calls in readiness)
+    has_siliconflow = bool((config.SILICONFLOW_API_KEY or "").strip())
+    components["siliconflow_api_key"] = "configured" if has_siliconflow else "missing"
+
+    has_baidu = bool(os.getenv("BAIDU_APP_ID", "").strip()) and bool(os.getenv("BAIDU_SECRET_KEY", "").strip())
+    components["baidu_ocr_creds"] = "configured" if has_baidu else "missing"
+
+    # This service can still operate if at least one backend is available:
+    # - Text translation requires SiliconFlow
+    # - Image translation prefers Baidu, but can fallback to SiliconFlow multimodal if configured
+    if not (has_siliconflow or has_baidu):
+        ok = False
+
+    status_code = status.HTTP_200_OK if ok else status.HTTP_503_SERVICE_UNAVAILABLE
+    return JSONResponse(status_code=status_code, content={"status": "ready" if ok else "not ready", "components": components})
 
 @app.post("/translate", response_model=TranslateResponse)
 async def translate(req: TranslateRequest):

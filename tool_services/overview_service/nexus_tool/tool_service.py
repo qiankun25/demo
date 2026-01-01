@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import hashlib
 from typing import List, Dict, Any
 
 import httpx
@@ -51,12 +52,10 @@ class OverviewToolService(BaseToolService):
     def __init__(self):
         super().__init__(service_name="overview", cmd_routing_key="cmd.overview.start")
 
-    async def do_work(self, input_key: str, params: dict) -> str:
-        payload = await MockStorage.get(input_key)
-        if not payload:
-            raise ValueError(f"input_key={input_key} not found in storage")
+    async def do_work(self, input_ref: dict, params: dict) -> tuple[dict, dict]:
+        payload = params or {}
         if not isinstance(payload, dict):
-            raise ValueError("payload must be a dict")
+            raise ValueError("params must be a dict")
 
         if not config.SILICONFLOW2_API_KEY:
             raise RuntimeError("SILICONFLOW2_API_KEY is required for overview generation")
@@ -71,7 +70,10 @@ class OverviewToolService(BaseToolService):
         prompt = self._build_prompt(summaries=summaries, domain=domain, style=style)
         overview_md = await self._call_siliconflow2(prompt)
 
-        output_key = f"data:overview:{input_key}"
+        trace_id = str((input_ref or {}).get("id") or "")
+        if not trace_id:
+            trace_id = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        output_key = f"overview/reports/{trace_id}.json"
         await MockStorage.save(
             output_key,
             {
@@ -84,7 +86,10 @@ class OverviewToolService(BaseToolService):
                 },
             },
         )
-        return output_key
+        return (
+            {"service": "overview", "type": "overview_report", "id": trace_id, "version": "v1"},
+            {"paper_count": len(summaries)},
+        )
 
     def _build_prompt(self, summaries: List[Dict[str, Any]], domain: str, style: str) -> str:
         # 去重 + 截断，避免 prompt 过长

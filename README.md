@@ -97,12 +97,12 @@ export CHROMA_COLLECTION="morning_report"
 
 ```bash
 # Parser summary（可选）
-export SILICONFLOW_API_KEY="sk-buicstsfegdrvyvakdtqvwyhydmqwrpldpsyiaocnmftqmca"
+export SILICONFLOW_API_KEY="<YOUR_SILICONFLOW_API_KEY>"
 export SILICONFLOW_API_BASE="https://api.siliconflow.cn/v1/chat/completions"
 export SILICONFLOW_MODEL="deepseek-ai/DeepSeek-V3"
 
 # Overview（必须，用于 SUMMARY_REPORT）
-export SILICONFLOW2_API_KEY="sk-buicstsfegdrvyvakdtqvwyhydmqwrpldpsyiaocnmftqmca"
+export SILICONFLOW2_API_KEY="<YOUR_SILICONFLOW2_API_KEY>"
 export SILICONFLOW2_API_BASE="https://api.siliconflow.cn/v1/chat/completions"
 export SILICONFLOW2_MODEL="deepseek-ai/DeepSeek-V3"
 ```
@@ -137,6 +137,39 @@ DEMO_TASK_TYPE=SUMMARY_REPORT python3 run_demo.py
 输出：
 - 终端打印最终 `data:summary_report:{trace_id}`（包含 `overview_md`）
 - 同时写入 MinIO
+
+---
+
+### 4.3 严格微服务联调（推荐：Compose 一键起全链路）
+
+如果你要验证“严格微服务（独立 DB + Query API + claim-check refs）”的演进版本，可以直接使用：
+
+```bash
+docker compose -f docker-compose.microservices.yml up -d --build
+```
+
+关键端口：
+- Nexus API：`http://localhost:8000/api/v1`
+- Download API：`http://localhost:8001`
+- Indexing API：`http://localhost:8020`
+- Parser API：`http://localhost:8031`
+- Discovery API（Query）：`http://localhost:8004`
+- RabbitMQ：`http://localhost:15672`
+- MinIO Console：`http://localhost:9001`
+
+然后用现有脚本提交任务：
+
+```bash
+python tests/test_nexus_api.py
+```
+
+停止：
+
+```bash
+docker compose -f docker-compose.microservices.yml down
+```
+
+说明：当前仍保留 `data:*` key 的兼容路径，但编排服务会同时记录并下发 `input_ref/result_ref`，方便后续彻底移除共享 key 语义。
 
 ---
 

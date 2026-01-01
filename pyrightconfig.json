@@ -1,0 +1,15 @@
+{
+  "typeCheckingMode": "basic",
+  "executionEnvironments": [
+    {
+      "root": "tool_services",
+      "extraPaths": ["nexus_sdk", "tool_services/libs/contracts"]
+    },
+    {
+      "root": "nexus",
+      "extraPaths": ["nexus_sdk", "tool_services/libs/contracts"]
+    }
+  ]
+}
+
+

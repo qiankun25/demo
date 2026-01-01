@@ -1,13 +1,14 @@
-import os
 import uuid
 import logging
 import time
-from typing import Dict, Optional, Type
+from typing import Dict, Optional, Type, Any
+import hashlib
 from app.models.messages import MessagePackage, EventPayload
 from app.models.state_models import JobContext
 from app.models.workflow_models import WorkflowDefinition
 from app.infrastructure.mq_manager import MQManager
-from app.infrastructure.storage import StateManager, StorageBackend
+from app.infrastructure.storage import StorageBackend
+from app.infrastructure.state_db import DBStateManager
 from app.engine.workflows import WorkflowRegistry
 from app.engine.handlers import (
     EventHandler,
@@ -33,7 +34,7 @@ class WorkflowOrchestrator:
     def __init__(
         self, 
         mq: MQManager, 
-        state_manager: StateManager, 
+        state_manager: DBStateManager, 
         storage: StorageBackend,
         registry: WorkflowRegistry
     ):
@@ -73,27 +74,15 @@ class WorkflowOrchestrator:
         context = JobContext(
             trace_id=trace_id,
             task_type=task_type,
-            init_key=f"job:{trace_id}:init",
+            init_key="",  # ref-only: no shared storage key for init payload
             requested_limit=params.get("limit", 5),
             metadata=params
         )
-        
-        # Input key
-        input_key = f"data:job:{trace_id}:input"
-        await self.storage.put(input_key, params)
-        logger.info(
-            "job.submit.stored_input",
-            extra={
-                "trace_id": trace_id,
-                "job_task_type": task_type,
-                "input_key": input_key,
-                "duration_ms": int((time.monotonic() - t0) * 1000),
-            },
-        )
+        input_ref = {"service": "nexus", "type": "job", "id": trace_id, "version": "v1"}
         
         if task_type == "SUMMARY_REPORT":
             # SUMMARY_REPORT Special Logic: Fan-out on start
-            # Support two modes: direct papers data (new) or summary_report_key (legacy)
+            # Ref-only: require papers passed directly.
             papers = None
             
             if "papers" in params:
@@ -110,33 +99,14 @@ class WorkflowOrchestrator:
                     if not pdf_url or not str(pdf_url).strip():
                         raise ValueError(f"Paper at index {i} must have non-empty 'pdf_url'")
                 
-                # Store input data for audit/logging (optional but recommended)
-                summary_report_key = f"data:summary_report_input:{trace_id}"
-                summary_report_data = {
-                    "papers": papers,
-                    "domain": params.get("domain", ""),
-                    "style": params.get("style", "academic")
-                }
-                await self.storage.put(summary_report_key, summary_report_data)
-                logger.info(f"SUMMARY_REPORT: Stored input data to {summary_report_key}")
-                
-            elif "summary_report_key" in params:
-                # Legacy mode: Read from storage key
-                summary_report_key = params.get("summary_report_key")
-                logger.info(f"SUMMARY_REPORT: Using legacy mode with key {summary_report_key}")
-                
-                sr_data = await self.storage.get(summary_report_key)
-                if not sr_data:
-                    raise ValueError(f"Invalid summary report data at {summary_report_key}")
-                     
-                papers = sr_data.get("papers") or []
             else:
-                raise ValueError("SUMMARY_REPORT requires either 'papers' or 'summary_report_key' in parameters")
+                raise ValueError("SUMMARY_REPORT requires 'papers' in parameters (ref-only)")
             
             if not papers:
                 raise ValueError("SUMMARY_REPORT requires at least one paper")
                 
             work_keys = []
+            work_meta: Dict[str, Any] = {}
             for i, p in enumerate(papers):
                 if not isinstance(p, dict):
                     continue
@@ -147,28 +117,36 @@ class WorkflowOrchestrator:
                 # Generate key
                 wk = generate_work_key(trace_id, i)
                 work_keys.append(wk)
-                
-                # Save paper input
-                paper_input_key = f"data:work:{wk}"
-                await self.storage.put(paper_input_key, {
-                    "pdf_url": pdf_url,
-                    "title": p.get("title", ""),
+                work_meta[wk] = {
+                    "pdf_url": str(pdf_url).strip(),
+                    "title": (p.get("title") or "").strip(),
                     "authors": p.get("authors") or [],
-                    "source_url": pdf_url,
-                    "content_type": "application/pdf"
-                })
-                
-                # Dispatch to Parser directly (as per workflow)
+                    "canonical_id": (p.get("canonical_id") or "").strip(),
+                    "doi": (p.get("doi") or "").strip(),
+                    "publication_date": (p.get("publication_date") or "").strip(),
+                }
+                # Ref-only: start from downloader (so parser always consumes file_ref)
+                item_ref = {
+                    "service": "summary_report",
+                    "type": "pdf_url",
+                    "id": hashlib.sha256(str(pdf_url).encode("utf-8")).hexdigest()[:24],
+                    "version": "v1",
+                    "fetch": {"url": str(pdf_url).strip()},
+                }
                 await self.mq.publish_command(
-                    routing_key="cmd.parser.start",
+                    routing_key="cmd.downloader.start",
                     trace_id=trace_id,
-                    task_type="parser",
-                    input_key=paper_input_key,
-                    task_id=wk
+                    task_type="downloader",
+                    input_ref=item_ref,
+                    params={"url": str(pdf_url).strip(), "paper": work_meta[wk]},
+                    task_id=wk,
                 )
             
             context.work_keys = work_keys
             context.current_stage = "processing"
+            # persist meta mapping for downstream stages
+            if isinstance(context.metadata, dict):
+                context.metadata["work_meta"] = work_meta
             await self.state_manager.save_context(context)
             logger.info(f"Started SUMMARY_REPORT {trace_id} with {len(work_keys)} papers")
             logger.info(
@@ -198,7 +176,7 @@ class WorkflowOrchestrator:
                 routing_key=first_stage.command_routing_key,
                 trace_id=trace_id,
                 task_type=first_stage.name,
-                input_key=input_key,
+                input_ref=input_ref,
                 task_id=trace_id,
                 params=params
             )
@@ -211,7 +189,6 @@ class WorkflowOrchestrator:
                     "job_task_type": task_type,
                     "first_stage": first_stage.name,
                     "routing_key": first_stage.command_routing_key,
-                    "input_key": input_key,
                     "duration_ms": int((time.monotonic() - t0) * 1000),
                 },
             )
@@ -257,6 +234,25 @@ class WorkflowOrchestrator:
             )
             clear_trace_context()
             return
+
+        # Ref-only bookkeeping: persist result_ref for later report aggregation.
+        if isinstance(payload.result_ref, dict) and payload.result_ref.get("id"):
+            stage = (message.header.task_type or "").lower().strip()
+            wk = (payload.work_key or "").strip()
+
+            def _upd(ctx: JobContext) -> Dict[str, Any]:
+                refs = dict(getattr(ctx, "artifacts_refs", {}) or {})
+                key = f"{stage}:{wk}" if wk else stage
+                refs[key] = payload.result_ref
+                # stage-specific aliases
+                if stage == "discovery":
+                    refs["search_results"] = payload.result_ref
+                return {"artifacts_refs": refs}
+
+            try:
+                await self.state_manager.atomic_update_context(trace_id, _upd)
+            except Exception:
+                logger.warning("evt.ref.persist_failed", exc_info=True, extra={"trace_id": trace_id})
 
         # Determine handler based on task_type
         # We assume the task_type in header corresponds to the stage name
@@ -366,175 +362,79 @@ class WorkflowOrchestrator:
             failed = set((f.work_key for f in (context.failures or [])) if context.failures else [])
 
             if all_keys and (completed | failed) >= all_keys and context.current_stage == "processing":
-                # Build summaries from whatever successful parse artifacts we can find.
-                summaries = []
-                for wk in completed:
-                    # Prefer the canonical SUMMARY_REPORT parse pattern.
-                    parse_key_candidates = [
-                        f"data:parse:data:work:{wk}",
-                        # Fallback pattern when parser is fed downloader output (other workflows)
-                        f"data:parse:data:download:data:work:{wk}",
-                    ]
-                    parse_data = None
-                    for pk in parse_key_candidates:
-                        try:
-                            if await self.storage.exists(pk):
-                                parse_data = await self.storage.get(pk)
-                                break
-                        except Exception:
+                # Ref-only: dispatch overview using parse refs + parser Query API.
+                refs = getattr(context, "artifacts_refs", {}) or {}
+                wm = (context.metadata.get("work_meta") if isinstance(context.metadata, dict) else {}) or {}
+
+                import httpx
+
+                pbase = (self.settings.parser_base_url or "http://localhost:8031").rstrip("/")
+                summaries: list[dict] = []
+                async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+                    for wk in completed:
+                        pref = refs.get(f"parse:{wk}") if isinstance(refs, dict) else None
+                        if not (isinstance(pref, dict) and pref.get("type") == "parsed_doc" and pref.get("id")):
                             continue
-
-                    if not isinstance(parse_data, dict):
-                        continue
-
-                    meta = parse_data.get("meta") if isinstance(parse_data.get("meta"), dict) else {}
-                    summaries.append(
-                        {
-                            "paper": {
-                                "title": parse_data.get("title"),
-                                "authors": [],
-                                "pdf_url": meta.get("source_url"),
-                            },
-                            "llm_summary": parse_data.get("llm_summary", "") or "",
-                        }
-                    )
-
-                if summaries:
-                    overview_in_key = f"task:{trace_id}:overview_in"
-                    try:
-                        await self.storage.put(
-                            overview_in_key,
-                            {
-                                "summaries": summaries,
-                                "target_lang": "en",
-                                "domain": context.metadata.get("domain", "") if isinstance(context.metadata, dict) else "",
-                                "style": context.metadata.get("style", "academic") if isinstance(context.metadata, dict) else "academic",
-                            },
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "reconcile.summary_report.storage_put_overview_in_failed",
-                            exc_info=True,
-                            extra={"trace_id": trace_id, "overview_in_key": overview_in_key, "error": str(e)},
-                        )
-                        return False
-
-                    # Move stage first so polling reflects real progress even if publish is delayed.
-                    try:
-                        await self.state_manager.update_context(trace_id, {"current_stage": "overview"})
-                    except Exception:
-                        logger.error(
-                            "reconcile.summary_report.update_stage_failed",
-                            exc_info=True,
-                            extra={"trace_id": trace_id},
-                        )
-                        return False
-
-                    # If overview tool service is not configured (common in local demo),
-                    # generate a lightweight fallback overview so the job can complete.
-                    if not (os.getenv("SILICONFLOW2_API_KEY") or "").strip():
-                        overview_out_key = f"data:overview:{overview_in_key}"
-                        overview_md = self._fallback_overview_markdown(summaries)
-                        await self.storage.put(
-                            overview_out_key,
-                            {
-                                "overview_md": overview_md,
-                                "meta": {
-                                    "model": "fallback",
-                                    "paper_count": len(summaries),
-                                    "domain": (context.metadata.get("domain", "") if isinstance(context.metadata, dict) else ""),
-                                    "style": (context.metadata.get("style", "academic") if isinstance(context.metadata, dict) else "academic"),
-                                },
-                            },
-                        )
-                        await self.state_manager.update_context(trace_id, {"current_stage": "completed"})
-                        JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
-                        logger.warning(
-                            "reconcile.summary_report.overview_fallback.completed",
-                            extra={"trace_id": trace_id, "overview_output_key": overview_out_key},
-                        )
-                        return True
-
-                    try:
-                        await self.mq.publish_command(
-                            routing_key="cmd.overview.start",
-                            trace_id=trace_id,
-                            task_type="overview",
-                            input_key=overview_in_key,
-                            task_id=trace_id,
-                        )
-                        logger.info(
-                            "reconcile.summary_report.overview_dispatched",
-                            extra={"trace_id": trace_id, "overview_in_key": overview_in_key, "summaries_count": len(summaries)},
-                        )
-                        return False
-                    except Exception:
-                        logger.error(
-                            "reconcile.summary_report.publish_overview_failed",
-                            exc_info=True,
-                            extra={"trace_id": trace_id},
-                        )
-                        return False
-
-                # Nothing to summarize -> finalize to avoid infinite polling.
-                await self.state_manager.update_context(trace_id, {"current_stage": "completed"})
-                JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
-                logger.warning(
-                    "reconcile.summary_report.no_summaries.completed",
-                    extra={"trace_id": trace_id, "completed_count": len(completed), "failed_count": len(failed), "work_total": len(all_keys)},
-                )
-                return True
-            # If we're already in overview stage, reconcile completion based on stored artifact presence.
-            if context.current_stage == "overview":
-                overview_in_key = f"task:{trace_id}:overview_in"
-                overview_out_key = f"data:overview:{overview_in_key}"
-                try:
-                    if await self.storage.exists(overview_out_key):
-                        await self.state_manager.update_context(trace_id, {"current_stage": "completed"})
-                        JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
-                        logger.info(
-                            "reconcile.summary_report.overview_output_present.completed",
-                            extra={"trace_id": trace_id, "overview_output_key": overview_out_key},
-                        )
-                        return True
-                except Exception:
-                    # ignore and fall through
-                    pass
-
-                # If tool service isn't configured, produce fallback output even in overview stage.
-                if not (os.getenv("SILICONFLOW2_API_KEY") or "").strip():
-                    # Reuse successful parse artifacts for fallback generation.
-                    summaries = []
-                    for wk in set(context.completed_work_keys or []):
-                        parse_key = f"data:parse:data:work:{wk}"
-                        try:
-                            parse_data = await self.storage.get(parse_key)
-                        except Exception:
-                            parse_data = None
-                        if not isinstance(parse_data, dict):
+                        doc_id = str(pref.get("id"))
+                        r = await client.get(f"{pbase}/v1/parsed/{doc_id}")
+                        if r.status_code >= 400:
                             continue
-                        meta = parse_data.get("meta") if isinstance(parse_data.get("meta"), dict) else {}
+                        pdata = r.json()
+                        doc = pdata.get("data") if isinstance(pdata, dict) else None
+                        if not isinstance(doc, dict):
+                            continue
+                        chunks = doc.get("chunks") or []
+                        text = ""
+                        if isinstance(chunks, list) and chunks:
+                            c0 = chunks[0] if isinstance(chunks[0], dict) else {}
+                            text = str(c0.get("text") or "")[:800]
+                        meta = wm.get(wk) if isinstance(wm, dict) else {}
+                        if not isinstance(meta, dict):
+                            meta = {}
                         summaries.append(
                             {
-                                "paper": {"title": parse_data.get("title"), "authors": [], "pdf_url": meta.get("source_url")},
-                                "llm_summary": parse_data.get("llm_summary", "") or "",
+                                "paper": {
+                                    "title": meta.get("title"),
+                                    "authors": meta.get("authors") or [],
+                                    "pdf_url": meta.get("pdf_url"),
+                                },
+                                "llm_summary": text,
                             }
                         )
-                    if summaries:
-                        overview_md = self._fallback_overview_markdown(summaries)
-                        await self.storage.put(
-                            overview_out_key,
-                            {
-                                "overview_md": overview_md,
-                                "meta": {"model": "fallback", "paper_count": len(summaries)},
-                            },
-                        )
+
+                if summaries:
+                    await self.state_manager.update_context(trace_id, {"current_stage": "overview"})
+                    await self.mq.publish_command(
+                        routing_key="cmd.overview.start",
+                        trace_id=trace_id,
+                        task_type="overview",
+                        input_ref={"service": "nexus", "type": "job", "id": trace_id, "version": "v1"},
+                        params={
+                            "summaries": summaries,
+                            "target_lang": "en",
+                            "domain": context.metadata.get("domain", "") if isinstance(context.metadata, dict) else "",
+                            "style": context.metadata.get("style", "academic") if isinstance(context.metadata, dict) else "academic",
+                        },
+                        task_id=trace_id,
+                    )
+                    logger.info(
+                        "reconcile.summary_report.overview_dispatched",
+                        extra={"trace_id": trace_id, "summaries_count": len(summaries)},
+                    )
+                    return False
+
+                await self.state_manager.update_context(trace_id, {"current_stage": "completed"})
+                JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
+                logger.warning("reconcile.summary_report.no_summaries.completed", extra={"trace_id": trace_id})
+                return True
+
+            # If we're already in overview stage, reconcile completion based on stored ref presence.
+            if context.current_stage == "overview":
+                refs = getattr(context, "artifacts_refs", {}) or {}
+                if isinstance(refs, dict) and isinstance(refs.get("overview"), dict) and refs["overview"].get("id"):
                     await self.state_manager.update_context(trace_id, {"current_stage": "completed"})
                     JOB_COMPLETED_TOTAL.labels(task_type=context.task_type, status="success").inc()
-                    logger.warning(
-                        "reconcile.summary_report.overview_fallback_in_overview.completed",
-                        extra={"trace_id": trace_id, "overview_output_key": overview_out_key},
-                    )
+                    logger.info("reconcile.summary_report.overview_ref_present.completed", extra={"trace_id": trace_id})
                     return True
             
         return False

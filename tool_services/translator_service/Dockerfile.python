@@ -1,0 +1,26 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Nexus SDK
+COPY nexus_sdk /app/nexus_sdk
+RUN pip install --no-cache-dir /app/nexus_sdk
+
+# Copy Python adapter
+COPY tool_services/translator_service/python_adapter /app/python_adapter
+COPY tool_services/translator_service/nexus_tool /app/nexus_tool
+
+# Install dependencies
+RUN pip install --no-cache-dir httpx aio-pika
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Run adapter
+CMD ["python", "-m", "python_adapter.adapter"]
+

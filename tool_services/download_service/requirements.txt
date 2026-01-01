@@ -8,5 +8,7 @@ asyncpg
 minio
 httpx
 pydantic-settings
+aio-pika
 pytest
 pytest-asyncio
+alembic

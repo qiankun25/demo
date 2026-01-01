@@ -24,5 +24,9 @@ class JobContext(BaseModel):
     failures: List[FailureRecord] = Field(default_factory=list)
     discovery_key: Optional[str] = None
     artifacts: Dict[str, str] = Field(default_factory=dict, description="Map of step names to storage keys")
+    artifacts_refs: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Map of step names to claim-check refs (ResultRef-like dicts). Migration field.",
+    )
     current_stage: str = "init"
     metadata: Dict[str, Any] = Field(default_factory=dict)

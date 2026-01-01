@@ -2,6 +2,7 @@ import asyncio
 import json
 import traceback
 import time
+import os
 import aio_pika
 from aio_pika import ExchangeType, DeliveryMode, Message
 
@@ -107,11 +108,25 @@ class BaseToolService:
                 )
             )
 
-            # B. 执行业务逻辑 (抽象)
-            output_key = await self.do_work(cmd.input_key, cmd.params)
+            # B. 执行业务逻辑（ref-only）：必须基于 input_ref + params 产出 result_ref
+            input_ref = cmd.input_ref or {}
+            if not isinstance(input_ref, dict) or not input_ref:
+                raise ValueError("ref-only: missing input_ref in command payload")
 
-            # C. 构建成功事件
-            resp_payload = EventPayload(status="SUCCESS", output_key=output_key)
+            result_ref, metrics = await self.do_work(input_ref, cmd.params or {})
+            if not isinstance(result_ref, dict) or not result_ref.get("id") or not result_ref.get("type"):
+                raise ValueError(f"invalid result_ref returned by do_work: {result_ref!r}")
+
+            # C. 构建成功事件（ref-only：不再依赖 output_key）
+            resp_payload = EventPayload(status="SUCCESS")
+            resp_payload.version = "v1"
+            resp_payload.event = f"evt.{self.service_name}.finished"
+            resp_payload.trace_id = pkg.header.trace_id
+            resp_payload.work_key = getattr(cmd, "work_key", None) or (
+                cmd.task_id if cmd.task_id != pkg.header.trace_id else None
+            )
+            resp_payload.result_ref = result_ref
+            resp_payload.metrics = metrics or {"duration_ms": int((time.monotonic() - t0) * 1000)}
             routing_key = f"evt.{self.service_name}.finished"
 
         except Exception as e:
@@ -134,9 +149,15 @@ class BaseToolService:
             traceback.print_exc()
             # D. 构建失败事件
             if 'pkg' in locals():
-                # 注意：失败事件也携带 input_key，便于编排层做“部分失败”聚合
-                in_key = cmd.input_key if 'cmd' in locals() else None
-                resp_payload = EventPayload(status="FAIL", input_key=in_key, error_msg=str(e))
+                resp_payload = EventPayload(status="FAIL", error_msg=str(e))
+                try:
+                    resp_payload.version = "v1"
+                    resp_payload.event = f"evt.{self.service_name}.failed"
+                    resp_payload.trace_id = pkg.header.trace_id
+                    resp_payload.work_key = getattr(cmd, "work_key", None) or (cmd.task_id if cmd.task_id != pkg.header.trace_id else None)
+                    resp_payload.error = {"code": "EXCEPTION", "message": str(e)}
+                except Exception:
+                    pass
                 routing_key = f"evt.{self.service_name}.failed"
             else:
                 print("Could not deserialize message, sending to DLQ (handled by nack/reject implicitly if exception propagates)")
@@ -184,9 +205,9 @@ class BaseToolService:
         )
         print(f"[{self.service_name}] Sent Event: {routing_key}")
 
-    async def do_work(self, input_key: str, params: dict) -> str:
+    async def do_work(self, input_ref: dict, params: dict) -> tuple[dict, dict]:
         """
         [抽象] 业务逻辑
-        :return: output_key
+        :return: (result_ref, metrics)
         """
         raise NotImplementedError

@@ -32,6 +32,20 @@ _ensure_nexus_sdk_on_path()
 from nexus_sdk.base import BaseToolService  # noqa: E402
 from nexus_sdk.common import MockStorage  # noqa: E402
 
+
+def _ensure_discovery_db_on_path() -> None:
+    root = _repo_root()
+    p = os.path.join(root, "tool_services", "discovery_service", "app")
+    if os.path.isdir(p) and p not in sys.path:
+        sys.path.insert(0, p)
+
+
+_ensure_discovery_db_on_path()
+try:
+    from app.db import DiscoveryDB  # type: ignore
+except Exception:
+    DiscoveryDB = None  # type: ignore
+
 from . import config  # noqa: E402
 from .filters import encode_filters  # noqa: E402
 from .openalex_client import build_works_url, fetch_json_with_retry  # noqa: E402
@@ -153,10 +167,11 @@ class DiscoveryToolService(BaseToolService):
             # 缓存失败不影响主流程
             return
 
-    async def do_work(self, input_key: str, params: dict) -> str:
-        payload = await MockStorage.get(input_key)
-        if not payload:
-            raise ValueError(f"input_key={input_key} not found in storage")
+    async def do_work(self, input_ref: dict, params: dict) -> tuple[dict, dict]:
+        # ref-only: parameters are carried inline in cmd.params
+        payload = params or {}
+        if not isinstance(payload, dict):
+            raise ValueError("params must be a dict")
 
         raw_query = payload.get("query", "")
         _cleaned, enhanced_query = enhance_query(raw_query)
@@ -223,7 +238,14 @@ class DiscoveryToolService(BaseToolService):
                 f"[author={','.join(author_terms)}]"
             )
 
-        # 1) Redis 缓存命中：直接复用之前的结果（不改变对外输出结构）
+        trace_id = str((input_ref or {}).get("id") or (input_ref or {}).get("trace_id") or "")
+        if not trace_id:
+            # Not strictly required for correctness, but makes result_id stable.
+            trace_id = "no-trace"
+        result_id = hashlib.sha256(f"{trace_id}:{enhanced_query}:{filter_str_for_cache}".encode("utf-8")).hexdigest()[:24]
+        output_key = f"discovery/results/{result_id}.json"
+
+        # 1) Redis 缓存命中：直接复用之前的结果
         cache_key = self._stable_cache_key(
             enhanced_query=enhanced_query,
             filter_str=filter_str_for_cache,
@@ -235,9 +257,11 @@ class DiscoveryToolService(BaseToolService):
         )
         cached = await self._cache_get(cache_key)
         if isinstance(cached, dict) and cached.get("results") is not None:
-            output_key = f"data:discovery:{input_key}"
             await MockStorage.save(output_key, cached)
-            return output_key
+            return (
+                {"service": "discovery", "type": "search_result", "id": result_id, "version": "v1"},
+                {"result_count": len(cached.get("results") or []), "cache_hit": True, "cache_key": cache_key},
+            )
 
         sample_i, seed_i = self._normalize_sample_seed(sample, seed)
 
@@ -343,7 +367,7 @@ class DiscoveryToolService(BaseToolService):
         else:
             reduced = reduced_all[:limit]
 
-        output_key = f"data:discovery:{input_key}"
+        # result_id/output_key computed above (stable for same trace+query+filters)
         output_value = {
             "query": (raw_query or "").strip(),
             "query_enhanced": enhanced_query,
@@ -357,9 +381,29 @@ class DiscoveryToolService(BaseToolService):
             "results": reduced,
         }
         await MockStorage.save(output_key, output_value)
+        # Best-effort persist an index row in discovery_db so the Query API can resolve result_id -> output_key.
+        if DiscoveryDB is not None:
+            try:
+                db_url = os.getenv("DISCOVERY_DATABASE_URL") or os.getenv("DISCOVERY_DB_URL") or "sqlite:///./discovery.db"
+                db = DiscoveryDB.from_url(db_url)
+                # P0: schema must be managed by migrations job (Alembic), not at runtime.
+                qh = hashlib.sha256(
+                    json.dumps(
+                        {"q": enhanced_query, "f": filter_str_for_cache, "limit": limit},
+                        sort_keys=True,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()[:32]
+                db.put_result_index(result_id=result_id, trace_id=trace_id, output_key=output_key, query_hash=qh)
+            except Exception:
+                pass
         # 2) 写入 Redis 缓存（失败自动忽略）
         await self._cache_set(cache_key, output_value)
-        return output_key
+        return (
+            {"service": "discovery", "type": "search_result", "id": result_id, "version": "v1"},
+            {"result_count": len(reduced), "cache_key": cache_key},
+        )
 
     def _normalize_mailto(self, mailto: Any) -> str:
         m = str(mailto or "").strip()

@@ -1,0 +1,107 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: parser
+      POSTGRES_USER: parser_user
+      POSTGRES_PASSWORD: parser_pass
+    ports:
+      - "5435:5432"
+    volumes:
+      - parser_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U parser_user -d parser"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - parser_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  migrations:
+    build:
+      context: ../..
+      dockerfile: tool_services/parser_service/Dockerfile
+    environment:
+      PARSER_DATABASE_URL: postgresql://parser_user:parser_pass@db:5432/parser
+    depends_on:
+      db:
+        condition: service_healthy
+    command: alembic upgrade head
+
+  api:
+    build:
+      context: ../..
+      dockerfile: tool_services/parser_service/Dockerfile
+    ports:
+      - "8031:8031"
+    environment:
+      SERVICE_MODE: api
+      PARSER_DATABASE_URL: postgresql://parser_user:parser_pass@db:5432/parser
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      MINIO_SECURE: "false"
+      NEXUS_STORAGE_PREFIX: claimcheck/
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8031
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: tool_services/parser_service/Dockerfile
+    environment:
+      SERVICE_MODE: worker
+      PARSER_DATABASE_URL: postgresql://parser_user:parser_pass@db:5432/parser
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      MINIO_SECURE: "false"
+      NEXUS_STORAGE_PREFIX: claimcheck/
+      # downstream download-service (for signed URL) if you run it separately:
+      PARSER_DOWNLOAD_BASE_URL: http://host.docker.internal:8001
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: python app/mq_worker.py
+
+volumes:
+  parser_postgres_data:
+  parser_minio_data:
+
+

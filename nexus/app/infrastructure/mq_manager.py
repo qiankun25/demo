@@ -9,13 +9,27 @@ Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 3.4
 import json
 import logging
 import time
-from typing import Optional, Callable, Awaitable
+from typing import Optional, Callable, Awaitable, Dict, Any
 import aio_pika
 from aio_pika import ExchangeType, DeliveryMode, Message, connect_robust
 from aio_pika.abc import AbstractConnection, AbstractChannel, AbstractExchange, AbstractQueue
 
 from app.core.config import Settings
 from app.models.messages import MessagePackage, MsgHeader, CommandPayload
+
+
+def _maybe_import_contracts():
+    """Optional import for v1 claim-check contracts (keeps legacy compatibility)."""
+    try:
+        # Ensure monorepo libs are importable even when MQManager is imported directly in tests.
+        from app.core.paths import ensure_contracts_on_path
+
+        ensure_contracts_on_path()
+        from nexus_contracts.models import CommandPayloadV1, EventPayloadV1  # type: ignore
+
+        return CommandPayloadV1, EventPayloadV1
+    except Exception:
+        return None, None
 from app.infrastructure.metrics import COMMAND_PUBLISH_SECONDS
 from app.core.retry import with_retry, RetryConfig
 
@@ -115,9 +129,10 @@ class MQManager:
         routing_key: str,
         trace_id: str,
         task_type: str,
-        input_key: str,
+        input_key: str = "",
         task_id: Optional[str] = None,
-        params: Optional[dict] = None
+        params: Optional[dict] = None,
+        input_ref: Optional[dict] = None,
     ) -> None:
         """Publish a command message to a tool service
         
@@ -148,17 +163,45 @@ class MQManager:
             task_id = trace_id
             
         # Requirement 3.1, 3.2: Construct message package with header and payload
+        # Legacy payload (v0): keep for backward compatibility.
+        if not input_ref:
+            raise ValueError("ref-only: input_ref is required for publish_command")
+
+        legacy_payload = CommandPayload(
+            task_id=task_id,
+            input_key=input_key,
+            params=params or {},
+            trace_id=trace_id,
+            work_key=(task_id if task_id != trace_id else None),
+            version="v1",
+            command=routing_key,
+            input_ref=input_ref,
+        ).model_dump()
+
+        # v1 payload (claim-check ready). We embed it into the same `payload` dict
+        # so consumers can progressively migrate.
+        CommandPayloadV1, _ = _maybe_import_contracts()
+        if CommandPayloadV1 is not None:
+            v1 = CommandPayloadV1(
+                command=routing_key,
+                task_id=task_id,
+                trace_id=trace_id,
+                work_key=(task_id if task_id != trace_id else None),
+                params=params or {},
+                input_ref=input_ref,  # type: ignore[arg-type]
+                idempotency_key=f"{routing_key}:{trace_id}:{task_id}",
+            ).model_dump()
+            payload: Dict[str, Any] = {**legacy_payload, **v1}
+        else:
+            payload = legacy_payload
+
         message_package = MessagePackage(
             header=MsgHeader(
                 trace_id=trace_id,
                 task_type=task_type,
                 sender=self.config.service_name
             ),
-            payload=CommandPayload(
-                task_id=task_id,
-                input_key=input_key,
-                params=params or {}
-            ).model_dump()
+            payload=payload
         )
         
         # Serialize to JSON
@@ -264,6 +307,7 @@ class MQManager:
                     )
                     
                     # Process the message with callback
+                    # Allow callback to interpret legacy or v1 payloads.
                     await callback(message_package)
                     
                     # Requirement 4.4: Message is acknowledged automatically by context manager

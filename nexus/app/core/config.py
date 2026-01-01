@@ -121,6 +121,19 @@ class Settings(BaseSettings):
         default="/api/v1",
         description="API route prefix"
     )
+
+    # Downstream Query APIs (used for report aggregation in strict microservices mode)
+    discovery_base_url: str = Field(default="http://localhost:8000", description="Discovery service API base URL")
+    download_base_url: str = Field(default="http://localhost:8001", description="Download service API base URL")
+    parser_base_url: str = Field(default="http://localhost:8031", description="Parser service API base URL")
+    indexing_base_url: str = Field(default="http://localhost:8020", description="Indexing service API base URL")
+    overview_base_url: str = Field(default="http://localhost:8040", description="Overview service API base URL")
+
+    # Orchestration DB (strict microservices migration)
+    database_url: str = Field(
+        default="sqlite:///./orchestration.db",
+        description="SQLAlchemy database URL for orchestration state (jobs/work_items/artifacts/outbox/inbox)",
+    )
     
     model_config = SettingsConfigDict(
         env_file=".env",

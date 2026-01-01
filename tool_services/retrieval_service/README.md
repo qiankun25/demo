@@ -20,7 +20,7 @@ export RETRIEVAL_INDEXING_BASE_URL="http://localhost:8020"
 # 可选：HTTP 超时（默认 30s）
 export RETRIEVAL_HTTP_TIMEOUT="30"
 
-uvicorn main:app --host 0.0.0.0 --port 8030 --reload
+uvicorn main:app --host 0.0.0.0 --port 8003 --reload
 ```
 
 ### 调用 `/semantic_search`
@@ -32,7 +32,7 @@ uvicorn main:app --host 0.0.0.0 --port 8030 --reload
 请求示例：
 
 ```bash
-curl -X POST "http://localhost:8030/semantic_search" \
+curl -X POST "http://localhost:8003/semantic_search" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "GNN",

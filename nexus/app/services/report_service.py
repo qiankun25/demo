@@ -2,6 +2,7 @@
 
 import logging
 from typing import Dict, Any, Optional, List
+import httpx
 from app.engine.orchestrator import WorkflowOrchestrator
 from app.models.report_models import (
     MorningReportResponse,
@@ -51,66 +52,26 @@ class ReportService:
             if not context:
                 raise ValueError(f"Job {trace_id} not found")
 
-        # Get discovery results if available
+        # Get discovery results if available (prefer claim-check ref + query API)
         discovery_data = None
-        discovery_key = context.artifacts.get("search_results")
-        if discovery_key:
+        discovery_ref = (getattr(context, "artifacts_refs", {}) or {}).get("search_results")
+        if isinstance(discovery_ref, dict) and discovery_ref.get("type") == "search_result" and discovery_ref.get("id"):
             try:
-                discovery_data = await self.storage.get(discovery_key)
+                url = self.orchestrator.settings.discovery_base_url.rstrip("/") + f"/v1/results/{discovery_ref['id']}"
+                async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+                    r = await client.get(url)
+                    r.raise_for_status()
+                    data = r.json()
+                if isinstance(data, dict) and isinstance(data.get("data"), dict):
+                    discovery_data = data["data"]
             except Exception as e:
-                logger.warning(f"Failed to get discovery data from {discovery_key}: {e}")
-
-        # Get init payload for input info
-        init_key = context.init_key
-        init_payload = None
-        if init_key:
-            try:
-                init_payload = await self.storage.get(init_key)
-            except Exception as e:
-                logger.warning(f"Failed to get init payload from {init_key}: {e}")
-
-        # Get manifest if available
-        manifest = None
-        manifest_key = context.artifacts.get("detailed_manifest")
-        if manifest_key:
-            try:
-                manifest = await self.storage.get(manifest_key)
-            except Exception as e:
-                logger.warning(f"Failed to get manifest from {manifest_key}: {e}")
-
+                logger.warning(f"Failed to get discovery data via ref {discovery_ref}: {e}")
         papers = []
         completed_work_keys = context.completed_work_keys or []
-
-        # Build papers from manifest if available, otherwise reconstruct from work_keys
-        if manifest and isinstance(manifest, list):
-            # Use manifest to get paper data
-            for item in manifest:
-                if not isinstance(item, dict):
-                    continue
-
-                work_key = item.get("work_key")
-                if not work_key or work_key not in completed_work_keys:
-                    continue
-
-                paper_report = await self._build_paper_from_keys(
-                    work_key, item.get("download_key"), item.get("parse_key"), item.get("index_key")
-                )
-                if paper_report:
-                    papers.append(paper_report)
-        else:
-            # Fallback: reconstruct keys from work_keys (same logic as handlers)
-            for work_key in completed_work_keys:
-                if not work_key:
-                    continue
-
-                work_in_key = f"data:work:{work_key}"
-                download_key = f"data:download:{work_in_key}"
-                parse_key = f"data:parse:{download_key}"
-                index_key = f"data:index:{parse_key}"
-
-                paper_report = await self._build_paper_from_keys(work_key, download_key, parse_key, index_key)
-                if paper_report:
-                    papers.append(paper_report)
+        for work_key in completed_work_keys:
+            pr = await self._build_paper_ref_only(context, work_key)
+            if pr:
+                papers.append(pr)
 
         # Convert failures to FailureInfo
         failure_infos = []
@@ -125,21 +86,16 @@ class ReportService:
                 )
             )
 
-        # Extract input information
         input_info = {}
-        if isinstance(init_payload, dict):
-            input_info["query"] = init_payload.get("query")
-            input_info["filters"] = init_payload.get("filters")
+        if isinstance(context.metadata, dict):
+            input_info["query"] = context.metadata.get("query")
+            input_info["filters"] = context.metadata.get("filters")
         elif discovery_data and isinstance(discovery_data, dict):
-            # Fallback to discovery data
             input_info["query"] = discovery_data.get("query")
             input_info["filters"] = discovery_data.get("filters")
 
         # Build keys dict
-        keys_dict = {
-            "init_key": context.init_key,
-            "discovery_key": context.artifacts.get("search_results"),
-        }
+        keys_dict = {"init_key": None, "discovery_key": None}
 
         return MorningReportResponse(
             trace_id=context.trace_id,
@@ -152,6 +108,58 @@ class ReportService:
             keys=keys_dict,
             input=input_info,
         )
+
+    async def _build_paper_ref_only(self, context: JobContext, work_key: str) -> Optional[PaperReport]:
+        """Build a PaperReport using refs + Query APIs (no shared storage keys)."""
+        try:
+            paper_meta = {}
+            if isinstance(context.metadata, dict):
+                wm = context.metadata.get("work_meta") or {}
+                if isinstance(wm, dict):
+                    paper_meta = wm.get(work_key) or {}
+            if not isinstance(paper_meta, dict):
+                paper_meta = {}
+
+            title = str(paper_meta.get("title") or "Unknown")
+            authors = paper_meta.get("authors") or []
+            if not isinstance(authors, list):
+                authors = []
+            pdf_url = paper_meta.get("pdf_url")
+
+            refs = getattr(context, "artifacts_refs", {}) or {}
+            parse_ref = refs.get(f"parser:{work_key}") if isinstance(refs, dict) else None
+
+            llm_summary = ""
+            if isinstance(parse_ref, dict) and parse_ref.get("type") == "parsed_doc" and parse_ref.get("id"):
+                pbase = self.orchestrator.settings.parser_base_url.rstrip("/")
+                async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+                    r = await client.get(f"{pbase}/v1/parsed/{parse_ref['id']}")
+                    if r.status_code < 400:
+                        pdata = r.json()
+                        doc = pdata.get("data") if isinstance(pdata, dict) else None
+                        if isinstance(doc, dict):
+                            chunks = doc.get("chunks") or []
+                            if isinstance(chunks, list) and chunks:
+                                c0 = chunks[0] if isinstance(chunks[0], dict) else {}
+                                llm_summary = str(c0.get("text") or "")[:800]
+
+            return PaperReport(
+                paper=PaperMetadata(
+                    title=title,
+                    authors=[str(a) for a in authors],
+                    pdf_url=pdf_url,
+                    openalex_id=paper_meta.get("canonical_id") or paper_meta.get("openalex_id"),
+                    doi=paper_meta.get("doi"),
+                    publication_date=paper_meta.get("publication_date"),
+                    original_url=pdf_url,
+                ),
+                summary=PaperSummary(llm_summary=llm_summary),
+                index=IndexInfo(),
+                keys=PaperKeys(work_key=work_key, download_key=None, parse_key=None, index_key=None),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to build paper (ref-only) for {work_key}: {e}")
+            return None
 
     async def _build_paper_from_keys(
         self, work_key: str, download_key: Optional[str], parse_key: Optional[str], index_key: Optional[str]
@@ -267,35 +275,19 @@ class ReportService:
             if not context:
                 raise ValueError(f"Job {trace_id} not found")
 
-        # Summary report typically has an overview artifact
-        # Try to find overview output key from artifacts
-        overview_key = None
-        for key, value in context.artifacts.items():
-            if "overview" in key.lower() or (isinstance(value, str) and value.startswith("data:overview:")):
-                overview_key = value
-                break
-
-        # If not found in artifacts, try common patterns
-        if not overview_key:
-            # Pattern 1: data:overview:task:{trace_id}:overview_in
-            possible_keys = [
-                f"data:overview:task:{trace_id}:overview_in",
-            ]
-            
-            for key in possible_keys:
-                try:
-                    if await self.storage.exists(key):
-                        overview_key = key
-                        break
-                except Exception:
-                    continue
-
+        # Ref-only: overview is fetched via overview-service Query API using result_ref
         overview_data = None
-        if overview_key:
+        refs = getattr(context, "artifacts_refs", {}) or {}
+        overview_ref = refs.get("overview") if isinstance(refs, dict) else None
+        if isinstance(overview_ref, dict) and overview_ref.get("type") == "overview_report" and overview_ref.get("id"):
             try:
-                overview_data = await self.storage.get(overview_key)
+                base = self.orchestrator.settings.overview_base_url.rstrip("/")
+                async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+                    r = await client.get(f"{base}/v1/reports/{overview_ref['id']}")
+                    r.raise_for_status()
+                    overview_data = r.json()
             except Exception as e:
-                logger.warning(f"Failed to get overview data from {overview_key}: {e}")
+                logger.warning(f"Failed to get overview via API: {e}")
 
         # Extract overview content
         overview_md = None
@@ -303,9 +295,10 @@ class ReportService:
         paper_count = None
 
         if isinstance(overview_data, dict):
-            overview_md = overview_data.get("overview_md")
-            meta = overview_data.get("meta") or {}
-            paper_count = meta.get("paper_count")
+            data = overview_data.get("data") if isinstance(overview_data.get("data"), dict) else overview_data
+            overview_md = data.get("overview_md")
+            meta = data.get("meta") or {}
+            paper_count = (meta.get("paper_count") if isinstance(meta, dict) else None)
 
         return SummaryReportResponse(
             trace_id=context.trace_id,

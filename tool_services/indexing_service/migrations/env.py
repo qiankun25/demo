@@ -18,6 +18,7 @@ from app.database.session import Base
 from app.core.config import settings
 from app.models.doc import Doc
 from app.models.chunk import Chunk
+from app.models.mq_events import InboxEvent, OutboxEvent
 
 target_metadata = Base.metadata
 

@@ -99,14 +99,29 @@ class MsgHeader(BaseModel):
 
 class CommandPayload(BaseModel):
     task_id: str
-    input_key: str
+    input_key: str = ""
     params: Dict[str, Any] = {}
+    # Optional v1 fields (ignored by legacy services)
+    version: Optional[str] = None
+    command: Optional[str] = None
+    trace_id: Optional[str] = None
+    work_key: Optional[str] = None
+    input_ref: Optional[Dict[str, Any]] = None
+    idempotency_key: Optional[str] = None
 
 class EventPayload(BaseModel):
     status: str          # "SUCCESS" / "FAIL"
     output_key: Optional[str] = None
     input_key: Optional[str] = None
     error_msg: Optional[str] = None
+    # Optional v1 fields
+    version: Optional[str] = None
+    event: Optional[str] = None
+    trace_id: Optional[str] = None
+    work_key: Optional[str] = None
+    result_ref: Optional[Dict[str, Any]] = None
+    error: Optional[Dict[str, Any]] = None
+    metrics: Optional[Dict[str, Any]] = None
 
 class MessagePackage(BaseModel):
     header: MsgHeader

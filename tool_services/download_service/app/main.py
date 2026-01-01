@@ -4,9 +4,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.database import init_db
 from app.routes import health
 from app.routes.download import router as download_router
+from app.routes.files import router as files_router
 from app.config import settings
 from app.services.storage import MinIOStorage
 
@@ -14,8 +14,7 @@ from app.services.storage import MinIOStorage
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
-    # Startup: Initialize database tables
-    await init_db()
+    # P0: DB schema must be managed by Alembic job, not at app startup.
     
     # Ensure storage bucket exists
     try:
@@ -57,3 +56,4 @@ app.add_middleware(
 # Include routers
 app.include_router(health.router)
 app.include_router(download_router)
+app.include_router(files_router)

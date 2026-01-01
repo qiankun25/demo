@@ -1,0 +1,452 @@
+version: "3.8"
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.9-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  db_nexus:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: nexus
+      POSTGRES_USER: nexus_user
+      POSTGRES_PASSWORD: nexus_pass
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus_user -d nexus"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  db_download:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: downloads
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d downloads"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  db_discovery:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: discovery
+      POSTGRES_USER: discovery_user
+      POSTGRES_PASSWORD: discovery_pass
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U discovery_user -d discovery"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  db_parser:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: parser
+      POSTGRES_USER: parser_user
+      POSTGRES_PASSWORD: parser_pass
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U parser_user -d parser"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  db_indexing:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: indexing
+      POSTGRES_USER: index_user
+      POSTGRES_PASSWORD: index_pass
+    ports:
+      - "5436:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U index_user -d indexing"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---- Migration jobs (one-off) ----
+  nexus_migrate:
+    build:
+      context: .
+      dockerfile: nexus/Dockerfile.microservices
+    command: alembic -c /app/nexus/alembic.ini upgrade head
+    environment:
+      DATABASE_URL: postgresql://nexus_user:nexus_pass@db_nexus:5432/nexus
+    depends_on:
+      db_nexus:
+        condition: service_healthy
+
+  discovery_migrate:
+    build:
+      context: .
+      dockerfile: tool_services/discovery_service/Dockerfile
+    command: alembic -c /app/alembic.ini upgrade head
+    environment:
+      DISCOVERY_DATABASE_URL: postgresql://discovery_user:discovery_pass@db_discovery:5432/discovery
+    depends_on:
+      db_discovery:
+        condition: service_healthy
+
+  download_migrate:
+    build:
+      context: ./tool_services/download_service
+      dockerfile: Dockerfile
+    command: alembic -c /app/alembic.ini upgrade head
+    environment:
+      DATABASE_URL: postgresql://user:pass@db_download:5432/downloads
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    depends_on:
+      db_download:
+        condition: service_healthy
+
+  parser_migrate:
+    build:
+      context: .
+      dockerfile: tool_services/parser_service/Dockerfile
+    command: alembic -c /app/alembic.ini upgrade head
+    environment:
+      PARSER_DATABASE_URL: postgresql://parser_user:parser_pass@db_parser:5432/parser
+    depends_on:
+      db_parser:
+        condition: service_healthy
+
+  indexing_migrate:
+    build:
+      context: .
+      dockerfile: tool_services/indexing_service/Dockerfile
+    command: alembic -c /app/alembic.ini upgrade head
+    environment:
+      INDEX_DATABASE_URL: postgresql://index_user:index_pass@db_indexing:5432/indexing
+    depends_on:
+      db_indexing:
+        condition: service_healthy
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nexus:
+    build:
+      context: .
+      dockerfile: nexus/Dockerfile.microservices
+    ports:
+      - "8000:8000"
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      DATABASE_URL: postgresql://nexus_user:nexus_pass@db_nexus:5432/nexus
+      DISCOVERY_BASE_URL: http://discovery_api:8000
+      DOWNLOAD_BASE_URL: http://download_api:8000
+      PARSER_BASE_URL: http://parser_api:8031
+      INDEXING_BASE_URL: http://indexing_api:8020
+      OVERVIEW_BASE_URL: http://overview_api:8040
+      WORKFLOW_CONFIG_PATH: config/workflows.yaml
+    depends_on:
+      nexus_migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      db_nexus:
+        condition: service_healthy
+
+  discovery_worker:
+    build:
+      context: .
+      dockerfile: tool_services/discovery_service/Dockerfile
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      DISCOVERY_DATABASE_URL: postgresql://discovery_user:discovery_pass@db_discovery:5432/discovery
+    depends_on:
+      discovery_migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      db_discovery:
+        condition: service_healthy
+
+  discovery_api:
+    build:
+      context: .
+      dockerfile: tool_services/discovery_service/Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8004:8000"
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      DISCOVERY_DATABASE_URL: postgresql://discovery_user:discovery_pass@db_discovery:5432/discovery
+    depends_on:
+      discovery_migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+      db_discovery:
+        condition: service_healthy
+
+  download_api:
+    build:
+      context: ./tool_services/download_service
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8000"
+    environment:
+      DATABASE_URL: postgresql://user:pass@db_download:5432/downloads
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      MINIO_ENDPOINT: minio:9000
+      MINIO_EXTERNAL_ENDPOINT: localhost:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      MINIO_SECURE: "false"
+    depends_on:
+      download_migrate:
+        condition: service_completed_successfully
+      db_download:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  download_celery:
+    build:
+      context: ./tool_services/download_service
+      dockerfile: Dockerfile
+    command: celery -A app.celery_app worker --loglevel=info
+    environment:
+      DATABASE_URL: postgresql://user:pass@db_download:5432/downloads
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      MINIO_ENDPOINT: minio:9000
+      MINIO_EXTERNAL_ENDPOINT: localhost:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      MINIO_SECURE: "false"
+    depends_on:
+      download_migrate:
+        condition: service_completed_successfully
+      db_download:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  download_worker:
+    build:
+      context: ./tool_services/download_service
+      dockerfile: Dockerfile
+    command: python -m app.mq_worker
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      DATABASE_URL: postgresql://user:pass@db_download:5432/downloads
+      MINIO_ENDPOINT: minio:9000
+      MINIO_EXTERNAL_ENDPOINT: localhost:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      MINIO_SECURE: "false"
+      DOWNLOAD_MINIO_PREFIX: download/
+      DOWNLOAD_CMD_ROUTING_KEY: cmd.downloader.start
+      DOWNLOAD_CMD_QUEUE: q.download.worker
+    depends_on:
+      download_migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      db_download:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  parser_api:
+    build:
+      context: .
+      dockerfile: tool_services/parser_service/Dockerfile
+    ports:
+      - "8031:8031"
+    environment:
+      PARSER_DATABASE_URL: postgresql://parser_user:parser_pass@db_parser:5432/parser
+      PARSER_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      PARSER_DOWNLOAD_BASE_URL: http://download_api:8000
+    depends_on:
+      parser_migrate:
+        condition: service_completed_successfully
+      db_parser:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  parser_worker:
+    build:
+      context: .
+      dockerfile: tool_services/parser_service/Dockerfile
+    command: python -m app.mq_worker
+    environment:
+      PARSER_DATABASE_URL: postgresql://parser_user:parser_pass@db_parser:5432/parser
+      PARSER_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      PARSER_DOWNLOAD_BASE_URL: http://download_api:8000
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      NEXUS_STORAGE_PREFIX: claimcheck/
+    depends_on:
+      parser_migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      db_parser:
+        condition: service_healthy
+
+  indexing_api:
+    build:
+      context: .
+      dockerfile: tool_services/indexing_service/Dockerfile
+    ports:
+      - "8020:8020"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8020
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      INDEX_DATABASE_URL: postgresql://index_user:index_pass@db_indexing:5432/indexing
+      INDEX_CHROMA_PERSIST_DIR: /app/.chroma
+      INDEX_CHROMA_COLLECTION: morning_report
+      INDEX_PARSER_BASE_URL: http://parser_api:8031
+    volumes:
+      - ./tool_services/indexing_service/.chroma:/app/.chroma
+    depends_on:
+      indexing_migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+      db_indexing:
+        condition: service_healthy
+
+  indexing_worker:
+    build:
+      context: .
+      dockerfile: tool_services/indexing_service/Dockerfile
+    command: python -m app.worker_main
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      INDEX_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      INDEX_DATABASE_URL: postgresql://index_user:index_pass@db_indexing:5432/indexing
+      INDEX_CHROMA_PERSIST_DIR: /app/.chroma
+      INDEX_CHROMA_COLLECTION: morning_report
+      INDEX_PARSER_BASE_URL: http://parser_api:8031
+      INDEX_CMD_ROUTING_KEY: cmd.indexer.start
+      INDEX_CMD_QUEUE: q.index.worker
+    volumes:
+      - ./tool_services/indexing_service/.chroma:/app/.chroma
+    depends_on:
+      indexing_migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      db_indexing:
+        condition: service_healthy
+
+  overview_api:
+    build:
+      context: .
+      dockerfile: tool_services/overview_service/Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8040
+    ports:
+      - "8040:8040"
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  overview_worker:
+    build:
+      context: .
+      dockerfile: tool_services/overview_service/Dockerfile
+    command: python -m nexus_tool.tool_service
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+volumes:
+  minio_data:
+
+

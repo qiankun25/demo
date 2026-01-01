@@ -1,0 +1,87 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: indexing
+      POSTGRES_USER: index_user
+      POSTGRES_PASSWORD: index_pass
+    ports:
+      - "5436:5432"
+    volumes:
+      - indexing_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U index_user -d indexing"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  migrations:
+    build:
+      context: ../..
+      dockerfile: tool_services/indexing_service/Dockerfile
+    environment:
+      INDEX_DATABASE_URL: postgresql://index_user:index_pass@db:5432/indexing
+    depends_on:
+      db:
+        condition: service_healthy
+    command: alembic upgrade head
+
+  api:
+    build:
+      context: ../..
+      dockerfile: tool_services/indexing_service/Dockerfile
+    ports:
+      - "8020:8020"
+    environment:
+      SERVICE_MODE: api
+      INDEX_DATABASE_URL: postgresql://index_user:index_pass@db:5432/indexing
+      INDEX_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      INDEX_CHROMA_PERSIST_DIR: .chroma
+      INDEX_CHROMA_COLLECTION: paper_chunks
+      INDEX_CHROMA_DISTANCE: cosine
+      INDEX_EMBED_DIM: 256
+    volumes:
+      - indexing_chroma_data:/app/.chroma
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8020
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: tool_services/indexing_service/Dockerfile
+    environment:
+      SERVICE_MODE: worker
+      INDEX_DATABASE_URL: postgresql://index_user:index_pass@db:5432/indexing
+      INDEX_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      INDEX_CHROMA_PERSIST_DIR: .chroma
+      INDEX_CHROMA_COLLECTION: paper_chunks
+      INDEX_CHROMA_DISTANCE: cosine
+      INDEX_EMBED_DIM: 256
+    volumes:
+      - indexing_chroma_data:/app/.chroma
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    command: python -m app.worker_main
+
+volumes:
+  indexing_postgres_data:
+  indexing_chroma_data:
+
+

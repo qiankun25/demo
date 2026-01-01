@@ -68,7 +68,12 @@ class ParserToolService(BaseToolService):
     def __init__(self):
         super().__init__(service_name="parser", cmd_routing_key="cmd.parser.start")
 
-    async def do_work(self, input_key: str, params: dict) -> str:
+    async def do_work(self, input_ref: dict, params: dict) -> tuple[dict, dict]:
+        # Deprecated in ref-only mode. Use `tool_services/parser_service` instead.
+        raise RuntimeError(
+            "paper_analyse ParserToolService is deprecated in ref-only mode; "
+            "use parser-service (cmd.parser.start with file_ref) for parsing."
+        )
         t0 = time.monotonic()
         payload = await MockStorage.get(input_key)
         if not payload:

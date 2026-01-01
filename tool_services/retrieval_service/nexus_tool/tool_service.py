@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 from typing import List, Dict, Any, Tuple
+import hashlib
 
 
 def _repo_root() -> str:
@@ -46,10 +47,10 @@ class RetrievalToolService(BaseToolService):
     def __init__(self):
         super().__init__(service_name="retrieval", cmd_routing_key="cmd.retrieval.start")
 
-    async def do_work(self, input_key: str, params: dict) -> str:
-        payload = await MockStorage.get(input_key)
-        if not payload:
-            raise ValueError(f"input_key={input_key} not found in storage")
+    async def do_work(self, input_ref: dict, params: dict) -> tuple[dict, dict]:
+        payload = params or {}
+        if not isinstance(payload, dict):
+            raise ValueError("params must be a dict")
 
         query = (payload.get("query") or "").strip()
         top_k = int(payload.get("top_k", 5))
@@ -58,23 +59,20 @@ class RetrievalToolService(BaseToolService):
         external_hits: List[Dict[str, Any]] = []  # 不做外部发现
         combined = local_hits[:top_k] if local_hits else []
 
-        output_key = f"data:retrieval:{input_key}"
+        out_id = hashlib.sha256(query.encode("utf-8")).hexdigest()[:24]
+        output_key = f"retrieval/results/{out_id}.json"
         await MockStorage.save(
             output_key,
-            {
-                "query": query,
-                "local_hits": local_hits,
-                "external_hits": external_hits,
-                "combined": combined,
-            },
+            {"query": query, "local_hits": local_hits, "external_hits": external_hits, "combined": combined},
         )
-        return output_key
+        return ({"service": "retrieval", "type": "retrieval_result", "id": out_id, "version": "v1"}, {"hit_count": len(combined)})
 
     async def _search_local(self, query: str, top_k: int) -> List[Dict[str, Any]]:
         """在 MinIO(Claim Check) 中遍历解析产物，做简单关键词匹配。"""
         hits: List[Tuple[float, Dict[str, Any]]] = []
         scan_limit = int(os.getenv("RETRIEVAL_LOCAL_SCAN_LIMIT", "50"))
-        keys = await MockStorage.list_keys("data:parse:")
+        # Ref-only mode: parse outputs live under parser/ prefix
+        keys = await MockStorage.list_keys("parser/parsed:")
         for k in keys[:scan_limit]:
             v = await MockStorage.get(k)
             if not isinstance(v, dict):

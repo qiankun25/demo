@@ -24,21 +24,11 @@ def _normalize_fs_path(path: str) -> str:
 
 
 def _normalize_database_url(url: str) -> str:
-    """Normalize sqlite URL so it does not depend on process CWD."""
+    """Deprecated: Postgres-only in P0."""
     url = (url or "").strip()
     if not url:
         return url
-    prefix = "sqlite:///"
-    if not url.startswith(prefix):
-        return url
-    # sqlite:///./index.db  OR sqlite:////abs/path/index.db
-    path_part = url[len(prefix) :]
-    if path_part.startswith("/"):
-        # already absolute (sqlite:////...)
-        return url
-    abs_path = os.path.abspath(os.path.join(_service_root_dir(), path_part))
-    # If abs_path starts with '/', this becomes sqlite:////abs_path which is correct.
-    return f"{prefix}{abs_path}"
+    return url
 
 
 class Settings(BaseSettings):
@@ -47,8 +37,8 @@ class Settings(BaseSettings):
     VERSION: str = "0.2.0"
     
     # Database Settings
-    # Default to SQLite for backward compatibility, but allow PostgreSQL for production
-    DATABASE_URL: str = Field("sqlite:///./index.db", description="Database connection string")
+    # P0: Postgres-only
+    DATABASE_URL: str = Field("postgresql://index_user:index_pass@localhost:5436/indexing", description="Database connection string")
     
     # Embedding Settings
     EMBED_DIM: int = Field(256, ge=32, le=2048, description="向量维度（hash embedding）")
@@ -68,8 +58,6 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Make defaults stable across processes (HTTP server vs MQ tool) by resolving relative paths
-# against the service root dir, not the process working directory.
-settings.DATABASE_URL = _normalize_database_url(settings.DATABASE_URL)
+# Make defaults stable across processes by resolving relative fs paths.
 settings.CHROMA_PERSIST_DIR = _normalize_fs_path(settings.CHROMA_PERSIST_DIR)
 

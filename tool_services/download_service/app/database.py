@@ -61,15 +61,13 @@ SessionLocal = sessionmaker(
 
 
 async def init_db():
-    """Initialize database by creating all tables."""
-    engine = get_async_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """Deprecated: schema must be created via Alembic migrations job."""
+    raise RuntimeError("init_db() is disabled in P0; run Alembic migrations instead.")
 
 
 def init_db_sync():
-    """Initialize database synchronously (for Celery workers)."""
-    Base.metadata.create_all(bind=sync_engine)
+    """Deprecated: schema must be created via Alembic migrations job."""
+    raise RuntimeError("init_db_sync() is disabled in P0; run Alembic migrations instead.")
 
 
 async def get_async_session():

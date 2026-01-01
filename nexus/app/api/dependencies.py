@@ -3,7 +3,9 @@ from typing import AsyncGenerator
 from fastapi import Depends
 from app.core.config import Settings, get_settings
 from app.infrastructure.mq_manager import MQManager
-from app.infrastructure.storage import StorageBackend, MinIOStorage, StateManager
+from app.infrastructure.storage import StorageBackend, MinIOStorage
+from app.infrastructure.orchestration_db import OrchestrationDB
+from app.infrastructure.state_db import DBStateManager
 from app.engine.workflows import WorkflowRegistry
 from app.engine.orchestrator import WorkflowOrchestrator
 from app.services.job_service import JobService
@@ -14,6 +16,7 @@ from app.services.report_service import ReportService
 _mq_manager = None
 _storage = None
 _workflow_registry = None
+_orch_db = None
 
 async def get_mq_manager(settings: Settings = Depends(get_settings)) -> MQManager:
     global _mq_manager
@@ -27,8 +30,14 @@ async def get_storage(settings: Settings = Depends(get_settings)) -> StorageBack
         _storage = MinIOStorage(settings)
     return _storage
 
-def get_state_manager(storage: StorageBackend = Depends(get_storage)) -> StateManager:
-    return StateManager(storage)
+async def get_orchestration_db(settings: Settings = Depends(get_settings)) -> OrchestrationDB:
+    global _orch_db
+    if not _orch_db:
+        _orch_db = OrchestrationDB.from_url(settings.database_url)
+    return _orch_db
+
+def get_state_manager(db: OrchestrationDB = Depends(get_orchestration_db)) -> DBStateManager:
+    return DBStateManager(db)
 
 def get_workflow_registry(settings: Settings = Depends(get_settings)) -> WorkflowRegistry:
     global _workflow_registry
@@ -47,7 +56,7 @@ def get_workflow_registry(settings: Settings = Depends(get_settings)) -> Workflo
 
 def get_orchestrator(
     mq: MQManager = Depends(get_mq_manager),
-    state_manager: StateManager = Depends(get_state_manager),
+    state_manager: DBStateManager = Depends(get_state_manager),
     storage: StorageBackend = Depends(get_storage),
     registry: WorkflowRegistry = Depends(get_workflow_registry)
 ) -> WorkflowOrchestrator:

@@ -4,6 +4,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    SERVICE_MODE=api
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
@@ -19,9 +25,23 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy service code
 COPY tool_services/overview_service/nexus_tool /app/nexus_tool
+COPY tool_services/overview_service/app /app/app
 
 # Set python path
 ENV PYTHONPATH=/app
 
-# Run the worker
-CMD ["python", "-m", "nexus_tool.tool_service"]
+# API port
+EXPOSE 8040
+
+# Healthcheck:
+# - In API mode: probe readiness endpoint
+# - In worker mode: always healthy (worker has no HTTP server)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD sh -c 'if [ "$SERVICE_MODE" = "worker" ]; then exit 0; else curl -fsS http://localhost:8040/health/ready >/dev/null; fi'
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+# Default: run API. Use `python -m nexus_tool.tool_service` for worker container.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8040"]

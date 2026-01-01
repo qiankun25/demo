@@ -10,6 +10,11 @@ aio-pika==9.3.1
 # Storage
 minio==7.2.3
 
+# Orchestration DB (state persistence)
+sqlalchemy==2.0.30
+psycopg2-binary==2.9.9
+alembic==1.13.1
+
 # Utilities
 python-multipart==0.0.6
 pyyaml==6.0.1

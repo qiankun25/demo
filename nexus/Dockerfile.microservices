@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install deps
+COPY nexus/requirements.txt /app/nexus/requirements.txt
+RUN pip install --no-cache-dir -r /app/nexus/requirements.txt
+
+# Copy nexus service code
+COPY nexus /app/nexus
+
+# Shared libs used by nexus (contracts)
+COPY tool_services/libs/contracts /app/tool_services/libs/contracts
+RUN pip install --no-cache-dir /app/tool_services/libs/contracts
+
+ENV PYTHONPATH=/app/nexus
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+

@@ -8,7 +8,9 @@
 - FastAPI
 - SQLite（元数据/倒排；包含 FTS5 时启用关键词检索）
 - Chroma（向量库，持久化 collection）
-- 向量化：默认 **hashing embedding**（无需模型/网络，便于本地跑通；后续可替换为真实 embedding 模型）\n+  - 注意：实现使用 **稳定 hash（sha256）**，避免 Python 内建 `hash()` 的跨进程不稳定。\n+  - 若你从旧版本升级（旧版使用 `hash()`），需要**重建**向量索引与本地数据（删除/清空 `INDEX_CHROMA_PERSIST_DIR` 与 `INDEX_DB_PATH` 对应文件）。\n 
+- 向量化：默认 **hashing embedding**（无需模型/网络，便于本地跑通；后续可替换为真实 embedding 模型）
+  - 注意：实现使用 **稳定 hash（sha256）**，避免 Python 内建 `hash()` 的跨进程不稳定。
+  - 若你从旧版本升级（旧版使用 `hash()`），需要**重建**向量索引与本地数据（删除/清空 `INDEX_CHROMA_PERSIST_DIR` 与 `INDEX_DB_PATH` 对应文件）。
 
 ## 启动
 ```bash

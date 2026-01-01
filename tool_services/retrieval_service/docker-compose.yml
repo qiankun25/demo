@@ -1,0 +1,73 @@
+version: "3.8"
+
+services:
+  index_db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: indexing
+      POSTGRES_USER: index_user
+      POSTGRES_PASSWORD: index_pass
+    volumes:
+      - retrieval_index_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U index_user -d indexing"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  index_migrations:
+    build:
+      context: ../..
+      dockerfile: tool_services/indexing_service/Dockerfile
+    environment:
+      INDEX_DATABASE_URL: postgresql://index_user:index_pass@index_db:5432/indexing
+    depends_on:
+      index_db:
+        condition: service_healthy
+    command: alembic upgrade head
+
+  indexing:
+    build:
+      context: ../..
+      dockerfile: tool_services/indexing_service/Dockerfile
+    ports:
+      - "8020:8020"
+    environment:
+      SERVICE_MODE: api
+      INDEX_DATABASE_URL: postgresql://index_user:index_pass@index_db:5432/indexing
+      INDEX_CHROMA_PERSIST_DIR: .chroma
+      INDEX_CHROMA_COLLECTION: paper_chunks
+      INDEX_CHROMA_DISTANCE: cosine
+      INDEX_EMBED_DIM: 256
+    volumes:
+      - retrieval_index_chroma_data:/app/.chroma
+    depends_on:
+      index_migrations:
+        condition: service_completed_successfully
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8020
+
+  api:
+    build:
+      context: ../..
+      dockerfile: tool_services/retrieval_service/Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      RETRIEVAL_INDEXING_BASE_URL: http://indexing:8020
+      RETRIEVAL_HTTP_TIMEOUT: "30"
+      RETRIEVAL_WORKER_ENABLED: "true"
+      # persist SQLite to a named volume for dev
+      RETRIEVAL_DB_PATH: /data/retrieval.db
+    volumes:
+      - retrieval_state_data:/data
+    depends_on:
+      indexing:
+        condition: service_started
+    command: uvicorn main:app --host 0.0.0.0 --port 8003
+
+volumes:
+  retrieval_index_postgres_data:
+  retrieval_index_chroma_data:
+  retrieval_state_data:
+
+

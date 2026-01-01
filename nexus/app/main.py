@@ -1,9 +1,13 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from app.core.config import get_settings
-from app.core.lifecycle import create_start_app_handler, create_stop_app_handler
-from app.api.routes import router as api_router
-from app.infrastructure.metrics import metrics_router
+from app.core.paths import ensure_contracts_on_path
+
+ensure_contracts_on_path()
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from app.core.config import get_settings  # noqa: E402
+from app.core.lifecycle import create_start_app_handler, create_stop_app_handler  # noqa: E402
+from app.api.routes import router as api_router  # noqa: E402
+from app.infrastructure.metrics import metrics_router  # noqa: E402
 
 def get_application() -> FastAPI:
     settings = get_settings()

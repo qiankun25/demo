@@ -21,8 +21,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
@@ -309,7 +310,58 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    ready = await health_ready()
+    code = ready.status_code
+    payload = ready.body
+    try:
+        shaped = json.loads(payload.decode("utf-8"))
+    except Exception:
+        shaped = {"status": "unknown", "raw": str(payload)}
+    shaped.setdefault("service", "retrieval_service")
+    shaped.setdefault("timestamp", time.time())
+    return JSONResponse(status_code=code, content=shaped)
+
+
+@app.get("/health/live")
+async def health_live():
+    return {"status": "alive"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    components: Dict[str, Any] = {}
+    ok = True
+
+    # Local state DB (SQLite)
+    try:
+        conn: sqlite3.Connection = app.state.db
+        conn.execute("SELECT 1").fetchone()
+        components["state_db"] = "ok"
+    except Exception as e:
+        ok = False
+        components["state_db"] = f"error: {e}"
+
+    # Downstream: indexing_service (required for semantic search / kb overview)
+    try:
+        base = (settings.indexing_base_url or "").rstrip("/")
+        if not base:
+            raise RuntimeError("RETRIEVAL_INDEXING_BASE_URL not configured")
+        async with httpx.AsyncClient(timeout=min(settings.http_timeout, 5.0), trust_env=False) as client:
+            # prefer readiness if available
+            url = _join(base, "/health/ready")
+            r = await client.get(url)
+            if r.status_code >= 400:
+                # fallback to /health
+                r = await client.get(_join(base, "/health"))
+            if r.status_code >= 400:
+                raise RuntimeError(f"indexing_service unhealthy: {r.status_code} {r.text[:200]!r}")
+        components["indexing_service"] = "ok"
+    except Exception as e:
+        ok = False
+        components["indexing_service"] = f"error: {e}"
+
+    status_code = status.HTTP_200_OK if ok else status.HTTP_503_SERVICE_UNAVAILABLE
+    return JSONResponse(status_code=status_code, content={"status": "ready" if ok else "not ready", "components": components})
 
 
 @app.get("/status/{doc_key}", response_model=StatusResponse)
@@ -430,10 +482,10 @@ async def semantic_search(req: SemanticSearchRequest):
     hits: List[SemanticSearchHit] = []
     for h in (shaped.get("hits") or []):
         if not isinstance(h, dict):
-                continue
+            continue
         try:
             hits.append(SemanticSearchHit(**h))
-            except Exception:
+        except Exception:
             continue
 
     return SemanticSearchResponse(

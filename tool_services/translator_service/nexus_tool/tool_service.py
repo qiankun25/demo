@@ -5,6 +5,7 @@ import base64
 import mimetypes
 import tempfile
 from typing import List, Dict, Any
+import hashlib
 
 import httpx
 
@@ -55,10 +56,10 @@ class TranslatorToolService(BaseToolService):
     def __init__(self):
         super().__init__(service_name="translator", cmd_routing_key="cmd.translator.start")
 
-    async def do_work(self, input_key: str, params: dict) -> str:
-        payload = await MockStorage.get(input_key)
-        if not payload:
-            raise ValueError(f"input_key={input_key} not found in storage")
+    async def do_work(self, input_ref: dict, params: dict) -> tuple[dict, dict]:
+        payload = params or {}
+        if not isinstance(payload, dict):
+            raise ValueError("params must be a dict")
 
         text = payload.get("text", "")
         images: List[str] = payload.get("images") or []
@@ -74,9 +75,14 @@ class TranslatorToolService(BaseToolService):
         if isinstance(output["meta"], dict):
             output["meta"].update({"target_lang": target_lang, "image_count": len(images), "model": config.DEFAULT_MODEL})
 
-        output_key = f"data:translate:{input_key}"
+        trace_id = str((input_ref or {}).get("id") or "") or "no-trace"
+        out_id = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+        output_key = f"translator/results/{trace_id}/{out_id}.json"
         await MockStorage.save(output_key, output)
-        return output_key
+        return (
+            {"service": "translator", "type": "translation", "id": out_id, "version": "v1"},
+            {"image_count": len(images), "target_lang": target_lang},
+        )
 
     def _to_image_part(self, image_ref: str) -> Dict[str, Any]:
         """

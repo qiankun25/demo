@@ -40,7 +40,9 @@ def submit_job(task_type: str, parameters: Dict[str, Any]) -> str:
         return trace_id
     except requests.exceptions.ConnectionError:
         print(f"  [错误] 无法连接到 Nexus ({NEXUS_URL})")
-        print(f"  请确认服务已启动: docker-compose ps nexus")
+        print("  请确认服务已启动:")
+        print("  - demo: docker compose -f docker-compose.yml up -d --build")
+        print("  - strict microservices: docker compose -f docker-compose.microservices.yml up -d --build")
         raise
     except Exception as e:
         print(f"  [错误] 提交失败: {e}")

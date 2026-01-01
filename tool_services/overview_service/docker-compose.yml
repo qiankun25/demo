@@ -1,0 +1,61 @@
+version: "3.8"
+
+services:
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - overview_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ../..
+      dockerfile: tool_services/overview_service/Dockerfile
+    ports:
+      - "8040:8040"
+    environment:
+      SERVICE_MODE: api
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      MINIO_SECURE: "false"
+      NEXUS_STORAGE_PREFIX: claimcheck/
+    depends_on:
+      minio:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8040
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: tool_services/overview_service/Dockerfile
+    environment:
+      SERVICE_MODE: worker
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: papers
+      MINIO_SECURE: "false"
+      NEXUS_STORAGE_PREFIX: claimcheck/
+      # LLM config (required for SUMMARY_REPORT)
+      SILICONFLOW2_API_KEY: ${SILICONFLOW2_API_KEY:-}
+      SILICONFLOW2_API_BASE: ${SILICONFLOW2_API_BASE:-https://api.siliconflow.cn/v1/chat/completions}
+      SILICONFLOW2_MODEL: ${SILICONFLOW2_MODEL:-deepseek-ai/DeepSeek-V3}
+    depends_on:
+      minio:
+        condition: service_healthy
+    command: python -m nexus_tool.tool_service
+
+volumes:
+  overview_minio_data:
+
+

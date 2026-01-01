@@ -1,14 +1,16 @@
 # Literature Download Service
 
-An asynchronous PDF download service built with FastAPI and Celery for the Dify platform's research agent ecosystem. This service enables reliable downloading of academic literature from various sources (arXiv, Semantic Scholar, Springer, etc.) with automatic retry mechanisms, MinIO storage, and PostgreSQL-based task tracking.
+An asynchronous PDF download and upload service built with FastAPI and Celery for the Dify platform's research agent ecosystem. This service enables reliable downloading of academic literature from various sources (arXiv, Semantic Scholar, Springer, etc.) with automatic retry mechanisms, direct file upload capability, MinIO storage, and PostgreSQL-based task tracking.
 
 ## Features
 
-- **Asynchronous Processing**: Non-blocking task queue using Celery and Redis
+- **Asynchronous Processing**: Non-blocking task queue using Celery and Redis for downloads
+- **Direct File Upload**: Batch upload multiple PDF files with presigned URL generation
 - **Automatic Retries**: Exponential backoff retry logic for transient failures (up to 3 attempts)
 - **Object Storage**: PDF files stored in MinIO (S3-compatible)
 - **Task Tracking**: PostgreSQL database for task status and metadata
-- **Presigned URLs**: Secure, time-limited file access (1-hour expiration)
+- **Presigned URLs**: Secure, time-limited file access (configurable expiration)
+- **Partial Success Handling**: Individual file failures don't affect batch uploads
 - **URL Validation**: Pre-download URL reachability checks
 - **Containerized**: Full Docker Compose deployment
 
@@ -91,6 +93,34 @@ No other dependencies are required - all services run in containers.
      "error_message": null,
      "created_at": "2024-01-15T10:30:00",
      "updated_at": "2024-01-15T10:30:15"
+   }
+   ```
+
+6. **Upload PDF files directly**:
+
+   ```bash
+   curl -X POST http://localhost:8000/upload \
+     -F "files=@document1.pdf" \
+     -F "files=@document2.pdf"
+   ```
+
+   Expected response:
+
+   ```json
+   {
+     "total": 2,
+     "success": 2,
+     "failed": 0,
+     "results": [
+       {
+         "file_name": "document1.pdf",
+         "status": "success",
+         "file_id": "uuid",
+         "presigned_url": "http://localhost:9000/papers/...",
+         "expires_in": 3600
+       },
+       ...
+     ]
    }
    ```
 
@@ -181,6 +211,122 @@ Query the status of a download task.
   "detail": "Task not found"
 }
 ```
+
+### POST /upload
+
+Upload multiple PDF files to MinIO storage.
+
+**Request:**
+
+- Content-Type: `multipart/form-data`
+- Fields:
+  - `files`: Multiple PDF files (required)
+  - `expires`: Presigned URL expiration time in seconds (optional, default: 3600, range: 60-604800)
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:8000/upload \
+  -F "files=@paper1.pdf" \
+  -F "files=@paper2.pdf" \
+  -F "expires=7200"
+```
+
+**Response (200 OK) - All files succeeded:**
+
+```json
+{
+  "total": 2,
+  "success": 2,
+  "failed": 0,
+  "results": [
+    {
+      "file_name": "paper1.pdf",
+      "status": "success",
+      "file_id": "550e8400-e29b-41d4-a716-446655440000",
+      "file_size": 2048576,
+      "mime_type": "application/pdf",
+      "presigned_url": "http://localhost:9000/papers/550e8400.../paper1.pdf?X-Amz-...",
+      "expires_in": 7200,
+      "created_at": "2024-01-15T10:30:00",
+      "error_message": null
+    },
+    {
+      "file_name": "paper2.pdf",
+      "status": "success",
+      "file_id": "550e8400-e29b-41d4-a716-446655440001",
+      "file_size": 1024768,
+      "mime_type": "application/pdf",
+      "presigned_url": "http://localhost:9000/papers/550e8400.../paper2.pdf?X-Amz-...",
+      "expires_in": 7200,
+      "created_at": "2024-01-15T10:30:01",
+      "error_message": null
+    }
+  ]
+}
+```
+
+**Response (200 OK) - Partial success:**
+
+```json
+{
+  "total": 3,
+  "success": 2,
+  "failed": 1,
+  "results": [
+    {
+      "file_name": "valid.pdf",
+      "status": "success",
+      "file_id": "550e8400-e29b-41d4-a716-446655440000",
+      "file_size": 2048576,
+      "mime_type": "application/pdf",
+      "presigned_url": "http://localhost:9000/papers/...",
+      "expires_in": 3600,
+      "created_at": "2024-01-15T10:30:00",
+      "error_message": null
+    },
+    {
+      "file_name": "toolarge.pdf",
+      "status": "failed",
+      "file_id": null,
+      "file_size": null,
+      "mime_type": null,
+      "presigned_url": null,
+      "expires_in": null,
+      "created_at": null,
+      "error_message": "File size exceeds limit (100MB)"
+    },
+    {
+      "file_name": "valid2.pdf",
+      "status": "success",
+      "file_id": "550e8400-e29b-41d4-a716-446655440001",
+      "file_size": 1024768,
+      "mime_type": "application/pdf",
+      "presigned_url": "http://localhost:9000/papers/...",
+      "expires_in": 3600,
+      "created_at": "2024-01-15T10:30:02",
+      "error_message": null
+    }
+  ]
+}
+```
+
+**Error Response (422 Unprocessable Entity):**
+
+- No files provided
+- Invalid expiration time (must be 60-604800 seconds)
+
+```json
+{
+  "detail": "No files provided"
+}
+```
+
+**Validation Rules:**
+
+- Only PDF files are accepted (`.pdf` extension and `application/pdf` MIME type)
+- Maximum file size: 100MB (configurable via `MAX_FILE_SIZE`)
+- Partial success: Individual file failures don't affect other files in the batch
 
 ### GET /health
 

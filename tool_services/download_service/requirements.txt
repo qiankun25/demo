@@ -8,5 +8,6 @@ asyncpg
 minio
 httpx
 pydantic-settings
+python-multipart
 pytest
 pytest-asyncio

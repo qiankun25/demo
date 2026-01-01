@@ -167,3 +167,5 @@ for paper in report["papers"]:
 - **统一格式**：无需了解底层工具服务数据格式
 - **向后兼容**：保留 `/artifacts/{artifact_key}` API 用于高级场景
 
+
+

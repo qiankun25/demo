@@ -61,6 +61,7 @@ services:
     build:
       context: ./nexus
       dockerfile: Dockerfile
+    image: nexus:prod
     ports:
       - "8000:8000"
     environment:
@@ -82,6 +83,7 @@ services:
     build:
       context: .
       dockerfile: tool_services/discovery_service/Dockerfile
+    image: discovery_service:prod
     environment:
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
       - MINIO_ENDPOINT=minio:9000
@@ -99,6 +101,7 @@ services:
     build:
       context: ./tool_services/download_service
       dockerfile: Dockerfile
+    image: download_service:prod
     ports:
       - "8001:8000"
     environment:
@@ -124,6 +127,7 @@ services:
     build:
       context: ./tool_services/download_service
       dockerfile: Dockerfile
+    image: download_service:prod
     command: celery -A app.celery_app worker --loglevel=info
     environment:
       - DATABASE_URL=postgresql://user:pass@db:5432/downloads
@@ -149,6 +153,7 @@ services:
     build:
       context: .
       dockerfile: tool_services/download_service/Dockerfile.tool
+    image: download_tool:prod
     environment:
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
       - MINIO_ENDPOINT=minio:9000
@@ -170,6 +175,7 @@ services:
     build:
       context: .
       dockerfile: tool_services/indexing_service/Dockerfile
+    image: indexing_service:prod
     ports:
       - "8020:8020"
     environment:
@@ -188,6 +194,7 @@ services:
     build:
       context: .
       dockerfile: tool_services/overview_service/Dockerfile
+    image: overview_service:prod
     environment:
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
       - MINIO_ENDPOINT=minio:9000
@@ -205,6 +212,7 @@ services:
     build:
       context: .
       dockerfile: tool_services/paper_analyse/Dockerfile.tool
+    image: paper_analyse_tool:prod
     environment:
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
       - MINIO_ENDPOINT=minio:9000
@@ -221,6 +229,7 @@ services:
     build:
       context: .
       dockerfile: tool_services/retrieval_service/Dockerfile
+    image: retrieval_service:prod
     ports:
       - "8003:8003"
     environment:
@@ -239,6 +248,7 @@ services:
     build:
       context: .
       dockerfile: tool_services/translator_service/Dockerfile
+    image: translator_service:prod
     ports:
       - "8002:8002"
     environment:

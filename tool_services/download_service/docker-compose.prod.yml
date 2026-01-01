@@ -9,7 +9,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-literature_downloads}
       POSTGRES_USER: ${POSTGRES_USER:-prod_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_STRONG_PASSWORD}
     ports:
       - "${DB_PORT:-5432}:5432"
     volumes:
@@ -33,7 +33,7 @@ services:
     image: redis:7-alpine
     container_name: literature-redis
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required} --maxmemory 512mb --maxmemory-policy allkeys-lru
+    command: redis-server --requirepass ${REDIS_PASSWORD:-CHANGE_ME_REDIS_PASSWORD} --maxmemory 512mb --maxmemory-policy allkeys-lru
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
@@ -53,8 +53,8 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-CHANGE_ME_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-CHANGE_ME_SECRET_KEY}
     ports:
       - "${MINIO_PORT:-9000}:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
@@ -75,13 +75,13 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
-    image: literature-download-service:latest
+    image: download_service:prod
     container_name: literature-app
     restart: unless-stopped
     ports:
       - "${APP_PORT:-8000}:8000"
     env_file:
-      - .env.production
+      - .env.production.example
     environment:
       # 覆盖容器内的服务地址
       DATABASE_URL: postgresql://${POSTGRES_USER:-prod_user}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-literature_downloads}
@@ -125,11 +125,11 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
-    image: literature-download-service:latest
+    image: download_service:prod
     container_name: literature-celery
     restart: unless-stopped
     env_file:
-      - .env.production
+      - .env.production.example
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-prod_user}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-literature_downloads}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -164,11 +164,11 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
-    image: literature-download-service:latest
+    image: download_service:prod
     container_name: literature-celery-beat
     restart: unless-stopped
     env_file:
-      - .env.production
+      - .env.production.example
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-prod_user}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-literature_downloads}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0

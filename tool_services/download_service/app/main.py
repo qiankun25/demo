@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db
 from app.routes import health
 from app.routes.download import router as download_router
+from app.routes.upload import router as upload_router
 from app.config import settings
 from app.services.storage import MinIOStorage
 
@@ -57,3 +58,4 @@ app.add_middleware(
 # Include routers
 app.include_router(health.router)
 app.include_router(download_router)
+app.include_router(upload_router)

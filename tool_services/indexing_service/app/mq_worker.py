@@ -21,14 +21,6 @@ from app.schemas.api_models import IndexRequest, DocIn, ChunkIn
 logger = logging.getLogger(__name__)
 
 
-CMD_EXCHANGE = os.getenv("NEXUS_CMD_EXCHANGE", "nexus.cmd.exchange")
-EVT_EXCHANGE = os.getenv("NEXUS_EVT_EXCHANGE", "nexus.evt.exchange")
-RABBIT_URL = os.getenv("RABBITMQ_URL", settings.RABBITMQ_URL)
-
-CMD_ROUTING_KEY = os.getenv("INDEX_CMD_ROUTING_KEY", "cmd.indexer.start")
-QUEUE_NAME = os.getenv("INDEX_CMD_QUEUE", "q.index.worker")
-
-
 def _mk_pkg(trace_id: str, task_type: str, sender: str, payload: Dict[str, Any]) -> bytes:
     pkg = {
         "header": {"trace_id": trace_id, "task_type": task_type, "sender": sender, "timestamp": time.time()},
@@ -48,15 +40,15 @@ class MQWorker:
         self.indexer = IndexerService(self.chroma_client, self.collection)
 
     async def run(self) -> None:
-        conn = await aio_pika.connect_robust(RABBIT_URL)
+        conn = await aio_pika.connect_robust(settings.RABBITMQ_URL)
         channel = await conn.channel()
-        await channel.set_qos(prefetch_count=int(os.getenv("NEXUS_PREFETCH", "4")))
+        await channel.set_qos(prefetch_count=settings.NEXUS_PREFETCH)
 
-        cmd_ex = await channel.declare_exchange(CMD_EXCHANGE, ExchangeType.DIRECT, durable=True)
-        evt_ex = await channel.declare_exchange(EVT_EXCHANGE, ExchangeType.TOPIC, durable=True)
+        cmd_ex = await channel.declare_exchange(settings.NEXUS_CMD_EXCHANGE, ExchangeType.DIRECT, durable=True)
+        evt_ex = await channel.declare_exchange(settings.NEXUS_EVT_EXCHANGE, ExchangeType.TOPIC, durable=True)
 
-        q = await channel.declare_queue(QUEUE_NAME, durable=True)
-        await q.bind(cmd_ex, routing_key=CMD_ROUTING_KEY)
+        q = await channel.declare_queue(settings.INDEX_CMD_QUEUE, durable=True)
+        await q.bind(cmd_ex, routing_key=settings.INDEX_CMD_ROUTING_KEY)
 
         async def _publisher_loop() -> None:
             while True:
@@ -66,11 +58,11 @@ class MQWorker:
                         db.query(OutboxEvent)
                         .filter(OutboxEvent.status == "PENDING")
                         .order_by(OutboxEvent.created_at_unix.asc())
-                        .limit(20)
+                        .limit(settings.OUTBOX_BATCH_SIZE)
                         .all()
                     )
                     if not pending:
-                        await asyncio.sleep(0.2)
+                        await asyncio.sleep(settings.OUTBOX_POLL_INTERVAL)
                         continue
                     for ev in pending:
                         try:
@@ -104,13 +96,13 @@ class MQWorker:
                     trace_id = str(header.get("trace_id") or "")
                     task_id = str(payload.get("task_id") or trace_id)
                     work_key = payload.get("work_key") or (task_id if task_id != trace_id else None)
-                    idem = str(payload.get("idempotency_key") or f"{CMD_ROUTING_KEY}:{trace_id}:{work_key or trace_id}")
+                    idem = str(payload.get("idempotency_key") or f"{settings.INDEX_CMD_ROUTING_KEY}:{trace_id}:{work_key or trace_id}")
 
                     db = SessionLocal()
                     try:
                         if db.query(InboxEvent).filter(InboxEvent.event_id == idem).first():
                             continue
-                        db.add(InboxEvent(event_id=idem, routing_key=CMD_ROUTING_KEY, trace_id=trace_id))
+                        db.add(InboxEvent(event_id=idem, routing_key=settings.INDEX_CMD_ROUTING_KEY, trace_id=trace_id))
                         db.commit()
 
                         input_ref = payload.get("input_ref") or {}
@@ -118,9 +110,9 @@ class MQWorker:
                             raise ValueError("ref-only: cmd.indexer.start requires input_ref.type=parsed_doc with id")
                         doc_id = str(input_ref.get("id"))
 
-                        base = os.getenv("INDEX_PARSER_BASE_URL", "http://localhost:8031").rstrip("/")
+                        base = settings.INDEX_PARSER_BASE_URL.rstrip("/")
                         url = f"{base}/v1/parsed/{doc_id}"
-                        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+                        async with httpx.AsyncClient(timeout=settings.HTTP_CLIENT_TIMEOUT, trust_env=False) as client:
                             r = await client.get(url)
                             r.raise_for_status()
                             pdata = r.json()
@@ -166,7 +158,7 @@ class MQWorker:
                         req = IndexRequest(doc=doc_in, chunks=chunks_in, upsert=True)
                         await self.indexer.index_document(db, req)
 
-                        evt_rk = "evt.indexer.finished"
+                        evt_rk = settings.EVT_INDEXER_FINISHED
                         evt_payload = {
                             "status": "SUCCESS",
                             "version": "v1",
@@ -188,7 +180,7 @@ class MQWorker:
                         )
                         db.commit()
                     except Exception as e:
-                        evt_rk = "evt.indexer.failed"
+                        evt_rk = settings.EVT_INDEXER_FAILED
                         evt_payload = {
                             "status": "FAIL",
                             "version": "v1",

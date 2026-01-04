@@ -5,12 +5,21 @@ from app.database.session import get_db
 from app.models.doc import Doc
 from app.models.chunk import Chunk
 from app.schemas.api_models import KnowledgeBaseOverviewResponse, OverviewDoc
+from app.core.config import settings
 
 router = APIRouter()
 
 @router.get("/kb/overview", response_model=KnowledgeBaseOverviewResponse)
-async def kb_overview(limit: int = 20, offset: int = 0, db: Session = Depends(get_db)):
-    limit = max(1, min(limit, 200))
+async def kb_overview(
+    limit: int = None, 
+    offset: int = None, 
+    db: Session = Depends(get_db)
+):
+    if limit is None:
+        limit = settings.KB_DEFAULT_LIMIT
+    if offset is None:
+        offset = settings.KB_DEFAULT_OFFSET
+    limit = max(1, min(limit, settings.KB_MAX_LIMIT))
     offset = max(0, offset)
     
     docs_count = db.query(func.count(Doc.doc_id)).scalar()

@@ -34,7 +34,7 @@ class DownloadTaskWithRetry(Task):
 @celery_app.task(
     bind=True,
     base=DownloadTaskWithRetry,
-    max_retries=3,
+    max_retries=3,  # Default value, actual value comes from settings.max_retries
     name="app.tasks.download_task.download_pdf_task"
 )
 def download_pdf_task(self, task_id: str) -> dict:
@@ -76,13 +76,14 @@ def download_pdf_task(self, task_id: str) -> dict:
             logger.error(f"Task not found: {task_id}")
             raise ValueError(f"Task {task_id} not found in database")
         
+        max_retries = settings.max_retries
         logger.info(
             "download_started",
             extra={
                 "task_id": task_id,
                 "url": task.url,
                 "attempt": self.request.retries + 1,
-                "max_retries": self.max_retries
+                "max_retries": max_retries
             }
         )
         
@@ -94,7 +95,7 @@ def download_pdf_task(self, task_id: str) -> dict:
         
         # Step 1: Validate URL reachability
         logger.debug(f"Validating URL: {task.url}")
-        validator = URLValidator(timeout=10)
+        validator = URLValidator()
         
         # Run async validation in sync context
         import asyncio
@@ -116,7 +117,7 @@ def download_pdf_task(self, task_id: str) -> dict:
         
         # Step 2: Download PDF file
         logger.debug(f"Downloading PDF from: {task.url}")
-        downloader = PDFDownloader(timeout=30)
+        downloader = PDFDownloader()
         
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -138,7 +139,8 @@ def download_pdf_task(self, task_id: str) -> dict:
             secret_key=settings.minio_secret_key,
             bucket=settings.minio_bucket,
             secure=settings.minio_secure,
-            external_endpoint=settings.minio_external_endpoint
+            external_endpoint=settings.minio_external_endpoint,
+            region=settings.aws_region
         )
         
         object_name = storage.upload_file(
@@ -189,7 +191,8 @@ def download_pdf_task(self, task_id: str) -> dict:
     
     except MaxRetriesExceededError:
         # All retries exhausted - mark as failed
-        error_msg = f"Max retries ({self.max_retries}) exceeded"
+        max_retries = settings.max_retries
+        error_msg = f"Max retries ({max_retries}) exceeded"
         logger.error(
             "download_failed_max_retries",
             extra={
@@ -234,19 +237,23 @@ def download_pdf_task(self, task_id: str) -> dict:
                 task.updated_at = datetime.utcnow()
                 
                 # If this is the last retry, mark as failed
-                if self.request.retries >= self.max_retries:
+                max_retries = settings.max_retries
+                if self.request.retries >= max_retries:
                     task.status = TaskStatus.FAILED
                     task.error_message = error_msg
-                    logger.error(f"Task failed after {self.max_retries} retries: {task_id}")
+                    logger.error(f"Task failed after {max_retries} retries: {task_id}")
                 
                 db.commit()
         
         # Retry with exponential backoff if retries remaining
-        if self.request.retries < self.max_retries:
-            # Calculate exponential backoff: 5 * (2 ** retry_count)
-            # Retry 0: 5s, Retry 1: 10s, Retry 2: 20s, Retry 3: 40s
-            countdown = 5 * (2 ** self.request.retries)
-            logger.info(f"Retrying task {task_id} in {countdown} seconds (attempt {self.request.retries + 2}/{self.max_retries + 1})")
+        max_retries = settings.max_retries
+        if self.request.retries < max_retries:
+            # Calculate exponential backoff: base * (2 ** retry_count)
+            countdown = min(
+                settings.retry_backoff_base * (2 ** self.request.retries),
+                settings.retry_backoff_max
+            )
+            logger.info(f"Retrying task {task_id} in {countdown} seconds (attempt {self.request.retries + 2}/{max_retries + 1})")
             
             raise self.retry(exc=exc, countdown=countdown)
         else:

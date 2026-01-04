@@ -1,6 +1,0 @@
-httpx
-PyPDF2
-pdfplumber
-pillow
-pdf2image
-pytesseract

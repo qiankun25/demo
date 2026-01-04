@@ -1,0 +1,179 @@
+# Retrieval Service Configuration
+# 所有硬编码值统一从此配置文件加载
+
+# 服务配置
+service:
+  name: "retrieval_service"
+  host: "0.0.0.0"
+  port: 8003
+  version: "0.1.0"
+  title: "Retrieval Service"
+  description: "统一检索编排层 + 事件驱动入库状态机"
+
+# 上游服务URLs
+upstreams:
+  discovery_base_url: "http://localhost:8000"
+  download_base_url: "http://localhost:8001"
+  parser_base_url: "http://localhost:3000"
+  indexing_base_url: "http://localhost:8020"
+
+# 可选凭证（用于数据集/代码入库）
+credentials:
+  kaggle_username: null
+  kaggle_key: null
+  github_token: null
+
+# 数据库配置
+database:
+  db_path: "retrieval.db"
+  index_db_path: null  # 默认指向 ../indexing_service/index.db
+  sqlite_timeout: 30.0
+
+# HTTP配置
+http:
+  timeout: 30.0
+  health_check_timeout: 5.0
+
+# 检索策略
+retrieval:
+  local_first: true
+  min_local_hits: 5
+  min_local_score: 0.01
+  ingest_external_hits: true
+  local_scan_limit: 50
+  semantic_search_k_multiplier: 3
+  semantic_search_max_k: 50
+
+# 下载轮询配置
+download_polling:
+  poll_interval: 5.0
+  max_polls: 60
+
+# Worker配置
+worker:
+  enabled: true
+  poll_interval: 1.0
+  max_event_attempts: 5
+  retry_delay_base: 60  # 最大重试延迟（秒）
+  retry_backoff_exponent: 2  # 指数退避的底数
+
+# Chroma向量数据库配置
+chroma:
+  collection: "paper_chunks"
+  distance: "cosine"
+  embed_dim: 256
+  persist_dir: null  # 默认指向 ../indexing_service/chroma_data
+
+# 哈希和ID生成配置
+hashing:
+  event_id_length: 24
+  doc_key_hash_length: 32
+  doc_id_hash_length: 32
+  query_id_hash_length: 24
+
+# 状态和事件类型常量
+constants:
+  # 文档状态
+  doc_status:
+    discovered: "DISCOVERED"
+    downloaded: "DOWNLOADED"
+    parsed: "PARSED"
+    indexed: "INDEXED"
+    failed: "FAILED"
+    unknown: "UNKNOWN"
+  
+  # 事件状态
+  event_status:
+    pending: "PENDING"
+    running: "RUNNING"
+    done: "DONE"
+    failed: "FAILED"
+  
+  # 事件类型
+  event_types:
+    paper_discovered: "PaperDiscovered"
+    dataset_discovered: "DatasetDiscovered"
+    code_discovered: "CodeDiscovered"
+    pdf_downloaded: "PdfDownloaded"
+    pdf_parsed: "PdfParsed"
+    indexed: "Indexed"
+  
+  # API路径
+  api_paths:
+    search: "/search"
+    semantic_search: "/semantic_search"
+    kb_overview: "/kb/overview"
+    download: "/download"
+    download_status: "/download/{task_id}"
+    parser_convert: "/api/convert"
+    index: "/index"
+    health: "/health"
+    health_live: "/health/live"
+    health_ready: "/health/ready"
+    status: "/status/{doc_key}"
+  
+  # 存储前缀和键
+  storage:
+    data_parse_prefix: "data:parse:"
+    parser_parsed_prefix: "parser/parsed:"
+    retrieval_results_prefix: "retrieval/results/"
+    papers_prefix: "papers/"
+  
+  # 文档键前缀
+  doc_key_prefixes:
+    canonical_id: "cid:"
+    url: "url:"
+  
+  # 资源类型标识符
+  resource_types:
+    arxiv: "arxiv:"
+    kaggle: "kaggle:"
+    github: "github:"
+  
+  # 文档类型
+  doc_types:
+    paper: "paper"
+    dataset: "dataset"
+    code: "code"
+  
+  # 来源标识
+  sources:
+    kaggle: "kaggle"
+    github: "github"
+  
+  # 其他常量
+  user_id: "retrieval_service"
+  minio_url_pattern: "http://localhost:9000/papers/"
+  kaggle_api_base: "https://www.kaggle.com/api/v1/datasets/view"
+  github_api_base: "https://api.github.com/repos"
+  github_readme_path: "/readme"
+  github_languages_path: "/languages"
+
+# 文本处理配置
+text_processing:
+  token_min_length: 3
+  summary_max_length: 800
+  readme_max_length: 20000
+  chunk_section_paths:
+    dataset: "dataset_details"
+    code: "repo_details"
+
+# 请求限制
+limits:
+  search_k_max: 50
+  search_k_min: 1
+  search_k_default: 10
+  semantic_search_k_max: 50
+  semantic_search_k_min: 1
+  semantic_search_k_default: 10
+  semantic_search_min_score_default: 0.0
+  kb_overview_limit_max: 200
+  kb_overview_limit_default: 20
+  kb_overview_offset_min: 0
+
+# CORS配置
+cors:
+  allow_origins: ["*"]
+  allow_methods: ["*"]
+  allow_headers: ["*"]
+

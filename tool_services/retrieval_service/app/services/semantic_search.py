@@ -57,13 +57,18 @@ async def semantic_search_via_indexing_service(
 
     External response structure is preserved by re-shaping indexing_service hits.
     """
+    # Import settings to get config values
+    from app.config import settings
+    
     # Ask indexing_service for vector-only search; we will surface vector score.
     # Request a bit more than k to allow min_score filtering while keeping top-k.
+    multiplier = settings.semantic_search_k_multiplier
+    max_k = settings.semantic_search_max_k
     raw = await search_indexing_service(
         base_url=indexing_base_url,
         http_timeout=http_timeout,
         query=query,
-        k=min(50, max(k * 3, k)),
+        k=min(max_k, max(k * multiplier, k)),
         kinds=None,
         filters={},
         use_vector=True,

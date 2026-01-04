@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from typing import Any, Dict, Optional
 
@@ -11,16 +10,17 @@ import aio_pika
 from aio_pika import ExchangeType, DeliveryMode, Message
 
 from app.db import DiscoveryDB
+from tool_services.discovery_service.settings import settings
 
 logger = logging.getLogger(__name__)
 
 
-CMD_EXCHANGE = os.getenv("NEXUS_CMD_EXCHANGE", "nexus.cmd.exchange")
-EVT_EXCHANGE = os.getenv("NEXUS_EVT_EXCHANGE", "nexus.evt.exchange")
-RABBIT_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+CMD_EXCHANGE = settings.nexus_cmd_exchange
+EVT_EXCHANGE = settings.nexus_evt_exchange
+RABBIT_URL = settings.rabbitmq_url
 
-CMD_ROUTING_KEY = os.getenv("DISCOVERY_CMD_ROUTING_KEY", "cmd.discovery.start")
-QUEUE_NAME = os.getenv("DISCOVERY_CMD_QUEUE", "q.discovery.worker")
+CMD_ROUTING_KEY = settings.discovery_cmd_routing_key
+QUEUE_NAME = settings.discovery_cmd_queue
 
 
 def _mk_pkg(trace_id: str, task_type: str, sender: str, payload: Dict[str, Any]) -> bytes:
@@ -38,7 +38,7 @@ class MQWorker:
     async def run(self) -> None:
         conn = await aio_pika.connect_robust(RABBIT_URL)
         channel = await conn.channel()
-        await channel.set_qos(prefetch_count=int(os.getenv("NEXUS_PREFETCH", "4")))
+        await channel.set_qos(prefetch_count=settings.nexus_prefetch)
 
         cmd_ex = await channel.declare_exchange(CMD_EXCHANGE, ExchangeType.DIRECT, durable=True)
         evt_ex = await channel.declare_exchange(EVT_EXCHANGE, ExchangeType.TOPIC, durable=True)

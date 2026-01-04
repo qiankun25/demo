@@ -21,8 +21,8 @@ def get_async_engine():
     if _async_engine is None:
         _async_engine = create_async_engine(
             settings.database_url.replace("postgresql://", "postgresql+asyncpg://"),
-            pool_size=20,
-            max_overflow=10,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
             pool_pre_ping=True,
             echo=False,
         )
@@ -46,8 +46,8 @@ def get_async_session_factory():
 sync_engine = create_engine(
     settings.database_url,
     poolclass=QueuePool,
-    pool_size=20,
-    max_overflow=10,
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
     pool_pre_ping=True,
     echo=False,
 )

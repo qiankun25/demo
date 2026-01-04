@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional, Tuple, Set, List
 
 import httpx
 
-from . import config
+from tool_services.discovery_service.settings import settings
 
 try:
     # optional: if redis is configured, use it for quota counters (cross-process)
@@ -30,21 +30,8 @@ _quota_day_count: int = 0
 _redis_client: Optional["Redis"] = None
 
 
-def _parse_int_list(s: str) -> Set[int]:
-    out: Set[int] = set()
-    for part in (s or "").split(","):
-        p = part.strip()
-        if not p:
-            continue
-        try:
-            out.add(int(p))
-        except Exception:
-            continue
-    return out
-
-
 def _retryable_statuses() -> Set[int]:
-    return _parse_int_list(getattr(config, "OPENALEX_RETRYABLE_STATUS_CODES", ""))
+    return set(settings.openalex_retryable_status_codes)
 
 
 async def _maybe_limit_concurrency() -> Optional[asyncio.Semaphore]:
@@ -52,7 +39,7 @@ async def _maybe_limit_concurrency() -> Optional[asyncio.Semaphore]:
     Concurrency limiter (process-local):
     - OPENALEX_MAX_CONCURRENCY: max in-flight OpenAlex requests
     """
-    max_c = int(getattr(config, "OPENALEX_MAX_CONCURRENCY", 0) or 0)
+    max_c = settings.openalex_max_concurrency
     if max_c <= 0:
         return None
     global _concurrency_sem
@@ -70,8 +57,8 @@ async def _maybe_rate_limit() -> None:
     - OPENALEX_RATE_LIMIT_RPS: refill rate (tokens/sec)
     - OPENALEX_RATE_LIMIT_BURST: bucket capacity
     """
-    rps = float(getattr(config, "OPENALEX_RATE_LIMIT_RPS", 0) or 0)
-    burst = int(getattr(config, "OPENALEX_RATE_LIMIT_BURST", 0) or 0)
+    rps = settings.openalex_rate_limit_rps
+    burst = settings.openalex_rate_limit_burst
     if rps <= 0 or burst <= 0:
         return
 
@@ -100,12 +87,12 @@ async def _maybe_rate_limit() -> None:
 
 async def _get_redis() -> Optional["Redis"]:
     global _redis_client
-    if not getattr(config, "REDIS_URL", ""):
+    if not settings.redis_connection_url:
         return None
     if Redis is None:
         return None
     if _redis_client is None:
-        _redis_client = Redis.from_url(config.REDIS_URL, encoding=None, decode_responses=False)
+        _redis_client = Redis.from_url(settings.redis_connection_url, encoding=None, decode_responses=False)
     return _redis_client
 
 
@@ -116,8 +103,8 @@ async def _maybe_enforce_quota() -> None:
     If REDIS_URL configured, use Redis INCR with expiry for cross-process stability;
     otherwise fallback to in-memory counters.
     """
-    per_min = int(getattr(config, "OPENALEX_QUOTA_PER_MINUTE", 0) or 0)
-    per_day = int(getattr(config, "OPENALEX_QUOTA_PER_DAY", 0) or 0)
+    per_min = settings.openalex_quota_per_minute
+    per_day = settings.openalex_quota_per_day
     if per_min <= 0 and per_day <= 0:
         return
 
@@ -181,7 +168,7 @@ def build_works_url(
     select: Optional[str] = None,
     mailto: Optional[str] = None,
 ) -> str:
-    base = config.OPENALEX_BASE.rstrip("/") + config.OPENALEX_WORKS_PATH
+    base = settings.openalex_base.rstrip("/") + settings.openalex_works_path
     params: Dict[str, Any] = {"per-page": per_page}
     if search:
         params["search"] = search
@@ -203,22 +190,22 @@ async def fetch_json_with_retry(url: str) -> Tuple[Dict[str, Any], Dict[str, Any
     对“可重试错误”做指数退避（可配置），并支持限流/配额。
     返回：(data, debug_meta)
     """
-    headers = {"User-Agent": config.OPENALEX_USER_AGENT}
+    headers = {"User-Agent": settings.openalex_user_agent}
     last_err: Optional[Exception] = None
     last_status: Optional[int] = None
     retryable = _retryable_statuses()
 
-    for attempt in range(config.OPENALEX_MAX_RETRIES):
+    for attempt in range(settings.openalex_max_retries):
         try:
             await _maybe_rate_limit()
             await _maybe_enforce_quota()
             sem = await _maybe_limit_concurrency()
             if sem is None:
-                async with httpx.AsyncClient(timeout=config.OPENALEX_TIMEOUT_S) as client:
+                async with httpx.AsyncClient(timeout=settings.openalex_timeout_s) as client:
                     resp = await client.get(url, headers=headers)
             else:
                 async with sem:
-                    async with httpx.AsyncClient(timeout=config.OPENALEX_TIMEOUT_S) as client:
+                    async with httpx.AsyncClient(timeout=settings.openalex_timeout_s) as client:
                         resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
                 try:
@@ -241,7 +228,7 @@ async def fetch_json_with_retry(url: str) -> Tuple[Dict[str, Any], Dict[str, Any
             if resp.status_code == 429:
                 ra = _retry_after_seconds(resp)
                 if ra is not None and ra > 0:
-                    await asyncio.sleep(min(float(getattr(config, "OPENALEX_BACKOFF_MAX_S", 30.0)), ra))
+                    await asyncio.sleep(min(settings.openalex_backoff_max_s, ra))
                 else:
                     await _sleep_backoff(attempt)
                 last_err = RuntimeError(f"OpenAlex HTTP 429 rate_limited")
@@ -270,9 +257,9 @@ async def fetch_json_with_retry(url: str) -> Tuple[Dict[str, Any], Dict[str, Any
 
 
 async def _sleep_backoff(attempt: int) -> None:
-    base = float(getattr(config, "OPENALEX_BACKOFF_BASE_S", 1.0)) * (2**attempt)
-    max_s = float(getattr(config, "OPENALEX_BACKOFF_MAX_S", 30.0))
-    jitter_ratio = float(getattr(config, "OPENALEX_BACKOFF_JITTER_RATIO", 0.2))
+    base = settings.openalex_backoff_base_s * (2**attempt)
+    max_s = settings.openalex_backoff_max_s
+    jitter_ratio = settings.openalex_backoff_jitter_ratio
     base = min(max_s, base)
     jitter = random.random() * max(0.0, jitter_ratio) * base
     await asyncio.sleep(min(max_s, base + jitter))

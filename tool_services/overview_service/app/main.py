@@ -7,11 +7,18 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+SERVICE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__)))
+REPO_ROOT = os.path.abspath(os.path.join(SERVICE_DIR, "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+if SERVICE_DIR not in sys.path:
+    sys.path.insert(0, SERVICE_DIR)
 
 
 def _ensure_repo_libs_on_path() -> None:
@@ -26,6 +33,7 @@ def _ensure_repo_libs_on_path() -> None:
 _ensure_repo_libs_on_path()
 
 from nexus_sdk.common import MockStorage  # noqa: E402
+from tool_services.overview_service import prompt_config  # noqa: E402
 
 app = FastAPI(title="Overview Service API", version="0.1.0")
 
@@ -79,6 +87,11 @@ class OverviewReportResponse(BaseModel):
     data: Dict[str, Any]
 
 
+class PromptUpdateRequest(BaseModel):
+    template: str = Field(..., min_length=1)
+    description: Optional[str] = Field(None)
+
+
 @app.get("/v1/reports/{trace_id}", response_model=OverviewReportResponse)
 async def get_report(trace_id: str) -> OverviewReportResponse:
     key = f"overview/reports/{trace_id}.json"
@@ -86,5 +99,35 @@ async def get_report(trace_id: str) -> OverviewReportResponse:
     if not isinstance(data, dict):
         raise HTTPException(status_code=404, detail="report not found")
     return OverviewReportResponse(trace_id=trace_id, data=data)
+
+
+def _format_prompt_entry(key: str, entry: Dict[str, str]) -> Dict[str, str]:
+    return {
+        "key": key,
+        "template": entry.get("template", ""),
+        "description": entry.get("description", "") or "",
+    }
+
+
+@app.get("/prompts")
+async def list_prompts():
+    return {"prompts": [_format_prompt_entry(k, v) for k, v in prompt_config.list_prompts().items()]}
+
+
+@app.get("/prompts/{prompt_key}")
+async def get_prompt(prompt_key: str):
+    entry = prompt_config.get_prompt_entry(prompt_key)
+    if not entry:
+        raise HTTPException(status_code=404, detail="prompt not found")
+    return _format_prompt_entry(prompt_key, entry)
+
+
+@app.put("/prompts/{prompt_key}")
+async def update_prompt(prompt_key: str, req: PromptUpdateRequest):
+    try:
+        updated = prompt_config.update_prompt(prompt_key, template=req.template, description=req.description)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _format_prompt_entry(prompt_key, updated)
 
 

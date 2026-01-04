@@ -1,22 +1,26 @@
 """PDF downloader service for fetching files from remote URLs."""
 
 import httpx
-from typing import Tuple
+from typing import Tuple, Optional
 from urllib.parse import urlparse
 import re
+
+from app.config import settings
 
 
 class PDFDownloader:
     """Service for downloading PDF files from remote URLs."""
 
-    def __init__(self, timeout: int = 30):
+    def __init__(self, timeout: Optional[int] = None, chunk_size: Optional[int] = None):
         """
         Initialize the PDF downloader.
 
         Args:
-            timeout: Request timeout in seconds (default: 30)
+            timeout: Request timeout in seconds (default: from config)
+            chunk_size: Chunk size for streaming downloads in bytes (default: from config)
         """
-        self.timeout = timeout
+        self.timeout = timeout or settings.downloader_timeout
+        self.chunk_size = chunk_size or settings.downloader_chunk_size
 
     async def download(self, url: str) -> Tuple[bytes, str]:
         """
@@ -53,7 +57,7 @@ class PDFDownloader:
 
                 # Stream file content in chunks
                 file_content = b""
-                async for chunk in response.aiter_bytes(chunk_size=8192):
+                async for chunk in response.aiter_bytes(chunk_size=self.chunk_size):
                     file_content += chunk
 
                 return file_content, filename

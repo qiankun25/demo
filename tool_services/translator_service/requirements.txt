@@ -9,3 +9,6 @@ dashscope
 pymupdf
 opencv-python
 Pillow
+SQLAlchemy>=2.0.20
+asyncpg>=0.29.0
+redis>=4.7.1

@@ -22,10 +22,20 @@ def _ensure_nexus_sdk_on_path() -> None:
             sys.path.append(c)
 
 
+def _ensure_service_paths_on_path() -> None:
+    service_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    repo_root = os.path.abspath(os.path.join(service_root, "..", ".."))
+    for path in (repo_root, service_root):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+
 _ensure_nexus_sdk_on_path()
+_ensure_service_paths_on_path()
 
 from nexus_sdk.base import BaseToolService  # noqa: E402
 from nexus_sdk.common import MockStorage  # noqa: E402
+from tool_services.overview_service import prompt_config  # noqa: E402
 from . import config  # noqa: E402
 
 
@@ -157,6 +167,7 @@ class OverviewToolService(BaseToolService):
         )
 
     async def _call_siliconflow2(self, prompt: str) -> str:
+        system_prompt = prompt_config.render_prompt("overview_markdown")
         headers = {
             "Authorization": f"Bearer {config.SILICONFLOW2_API_KEY}",
             "Content-Type": "application/json",
@@ -164,7 +175,7 @@ class OverviewToolService(BaseToolService):
         payload = {
             "model": config.SILICONFLOW2_MODEL,
             "messages": [
-                {"role": "system", "content": "You follow instructions precisely and output markdown only."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
             "max_tokens": config.OVERVIEW_MAX_TOKENS,

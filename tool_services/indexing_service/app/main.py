@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import status
 from fastapi.responses import JSONResponse
 import chromadb
-from app.core.config import settings
+from app.core.config import settings, get_cors_origins
 from app.database.session import engine
 from app.routes import index, search, kb
 
@@ -33,7 +33,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )

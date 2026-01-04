@@ -2,7 +2,9 @@
 
 import httpx
 import logging
-from typing import Tuple
+from typing import Tuple, Optional
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -10,14 +12,14 @@ logger = logging.getLogger(__name__)
 class URLValidator:
     """Service for validating URL reachability before attempting downloads."""
     
-    def __init__(self, timeout: int = 10):
+    def __init__(self, timeout: Optional[int] = None):
         """Initialize URL validator.
         
         Args:
-            timeout: Request timeout in seconds (default: 10)
+            timeout: Request timeout in seconds (default: from config)
         """
-        self.timeout = timeout
-        logger.info(f"URLValidator initialized with timeout: {timeout}s")
+        self.timeout = timeout or settings.validator_timeout
+        logger.info(f"URLValidator initialized with timeout: {self.timeout}s")
     
     async def is_reachable(self, url: str) -> Tuple[bool, str]:
         """Validate URL reachability using HEAD request with GET fallback.

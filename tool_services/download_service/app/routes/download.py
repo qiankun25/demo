@@ -145,10 +145,10 @@ async def get_task_status(
                     external_endpoint=settings.minio_external_endpoint
                 )
                 
-                # Generate presigned URL with 1 hour expiration
+                # Generate presigned URL with configured expiration
                 file_url = storage.get_presigned_url(
                     object_name=file.minio_object,
-                    expires=3600
+                    expires=settings.presigned_url_expires
                 )
         except Exception as e:
             # Log error but don't fail the entire request

@@ -25,10 +25,20 @@ def _ensure_nexus_sdk_on_path() -> None:
             sys.path.append(c)
 
 
+def _ensure_service_paths_on_path() -> None:
+    service_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    repo_root = os.path.abspath(os.path.join(service_root, "..", ".."))
+    for path in (repo_root, service_root):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+
 _ensure_nexus_sdk_on_path()
+_ensure_service_paths_on_path()
 
 from nexus_sdk.base import BaseToolService  # noqa: E402
 from nexus_sdk.common import MockStorage  # noqa: E402
+from tool_services.translator_service import prompt_config  # noqa: E402
 from . import config  # noqa: E402
 
 
@@ -116,15 +126,7 @@ class TranslatorToolService(BaseToolService):
 
         注意：这里不做“伪造兜底”，网络/鉴权失败会直接抛错。
         """
-        system_prompt = (
-            "You are a professional multilingual translator.\n"
-            "You will be given text and optionally images.\n"
-            "Task:\n"
-            f"1) Translate the given text into {target_lang}.\n"
-            f"2) For each image, produce a caption in {target_lang}. If there is readable text, extract it and translate it into {target_lang}.\n"
-            "Return STRICT JSON with this schema:\n"
-            '{\"text_translated\": string, \"images_translated\": [{\"input\": string, \"caption\": string, \"extracted_text\": string, \"translated_text\": string}]}'
-        )
+        system_prompt = prompt_config.render_prompt("multimodal_translation", target_lang=target_lang)
 
         user_parts: List[Dict[str, Any]] = []
         if text:

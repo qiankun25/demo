@@ -40,6 +40,34 @@ class Settings(BaseSettings):
     max_retries: int = 3
     user_agent: str = "Mozilla/5.0 (compatible; LiteratureBot/1.0)"
     
+    # Downloader service settings
+    downloader_timeout: int = 30  # Timeout for PDF downloader (seconds)
+    downloader_chunk_size: int = 8192  # Chunk size for streaming downloads (bytes)
+    
+    # URL validator settings
+    validator_timeout: int = 10  # Timeout for URL validation (seconds)
+    
+    # Presigned URL settings
+    presigned_url_expires: int = 3600  # Default presigned URL expiration (seconds, 1 hour)
+    presigned_url_min_expires: int = 60  # Minimum presigned URL expiration (seconds)
+    presigned_url_max_expires: int = 86400  # Maximum presigned URL expiration (seconds, 24 hours)
+    
+    # Retry settings
+    retry_backoff_base: int = 5  # Base delay for exponential backoff (seconds)
+    retry_backoff_max: int = 600  # Maximum delay for exponential backoff (seconds)
+    
+    # Celery task settings
+    celery_task_default_retry_delay: int = 5  # Default retry delay for Celery tasks (seconds)
+    celery_task_time_limit: int = 300  # Hard time limit for Celery tasks (seconds, 5 minutes)
+    celery_task_soft_time_limit: int = 240  # Soft time limit for Celery tasks (seconds, 4 minutes)
+    
+    # Database connection pool settings
+    db_pool_size: int = 20  # Database connection pool size
+    db_max_overflow: int = 10  # Maximum overflow connections for database pool
+    
+    # AWS/S3 region (default for MinIO)
+    aws_region_default: str = "us-east-1"  # Default AWS region for MinIO
+    
     # API settings
     api_rate_limit: int = 100
     cors_origins: str = "*"
@@ -59,6 +87,11 @@ class Settings(BaseSettings):
     sentry_environment: Optional[str] = None
     enable_metrics: bool = False
     metrics_port: int = 9090
+    
+    @property
+    def aws_region_value(self) -> str:
+        """Get AWS region value, using aws_region if set, otherwise default."""
+        return self.aws_region or self.aws_region_default
     
     class Config:
         env_file = ".env"

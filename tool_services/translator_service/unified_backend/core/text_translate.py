@@ -6,6 +6,7 @@ from dashscope import Generation
 import httpx
 
 from ..config import settings
+from tool_services.translator_service import prompt_config
 
 
 def translate_text(
@@ -69,10 +70,8 @@ def translate_text(
     if not settings.SILICONFLOW_API_KEY:
         raise RuntimeError("未配置 DASHSCOPE_API_KEY，且未配置 SILICONFLOW_API_KEY，无法翻译文本")
 
-    system_prompt = (
-        "You are a professional multilingual translator.\n"
-        f"Translate the given text from {source_lang} to {target_lang}.\n"
-        "Return ONLY the translated text."
+    system_prompt = prompt_config.render_prompt(
+        "text_translation", source_lang=source_lang, target_lang=target_lang
     )
 
     headers = {

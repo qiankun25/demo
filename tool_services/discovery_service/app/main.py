@@ -13,18 +13,8 @@ from typing import Any, Dict, Optional
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from pydantic_settings import BaseSettings
 
-
-class Settings(BaseSettings):
-    discovery_database_url: str = "postgresql://discovery_user:discovery_pass@localhost:5434/discovery"
-
-    class Config:
-        env_prefix = "DISCOVERY_"
-        case_sensitive = False
-
-
-settings = Settings()
+from tool_services.discovery_service.settings import settings
 
 
 def _ensure_contracts_on_path() -> None:
@@ -43,7 +33,7 @@ from nexus_sdk.common import MockStorage  # noqa: E402
 from app.db import DiscoveryDB  # noqa: E402
 
 
-db = DiscoveryDB.from_url(settings.discovery_database_url)
+db = DiscoveryDB.from_url(settings.database_url)
 # P0: schema must be managed by migrations job (Alembic), not at app startup.
 
 

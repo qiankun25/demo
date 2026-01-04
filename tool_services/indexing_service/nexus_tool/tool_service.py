@@ -35,7 +35,7 @@ import chromadb
 
 class IndexerToolService(BaseToolService):
     def __init__(self):
-        super().__init__(service_name="indexer", cmd_routing_key="cmd.indexer.start")
+        super().__init__(service_name="indexer", cmd_routing_key=settings.INDEX_CMD_ROUTING_KEY)
         # NOTE: ref-only + migrations mode: DB schema should be created by Alembic job, not at runtime.
         
         # Initialize Chroma
@@ -49,9 +49,9 @@ class IndexerToolService(BaseToolService):
 
     async def do_work(self, input_ref: dict, params: dict) -> tuple[dict, dict]:
         async def _fetch_parsed_via_parser_service(doc_id: str) -> Dict[str, Any]:
-            base = os.getenv("INDEX_PARSER_BASE_URL", "http://localhost:8031").rstrip("/")
+            base = settings.INDEX_PARSER_BASE_URL.rstrip("/")
             url = f"{base}/v1/parsed/{doc_id}"
-            async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=settings.HTTP_CLIENT_TIMEOUT, trust_env=False) as client:
                 r = await client.get(url)
                 r.raise_for_status()
                 data = r.json()

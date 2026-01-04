@@ -145,12 +145,12 @@ async def _handle_cmd(message: aio_pika.IncomingMessage, channel: aio_pika.abc.A
                 raise ValueError("ref-only: missing url in input_ref.fetch.url or params.url")
 
             # Validate + download (outside DB tx)
-            validator = URLValidator(timeout=10)
+            validator = URLValidator()
             ok, err = await validator.is_reachable(url)
             if not ok:
                 raise ValueError(f"url not reachable: {err}")
 
-            downloader = PDFDownloader(timeout=30)
+            downloader = PDFDownloader()
             content, filename = await downloader.download(url)
             file_size = len(content)
 
@@ -161,7 +161,7 @@ async def _handle_cmd(message: aio_pika.IncomingMessage, channel: aio_pika.abc.A
                 bucket=settings.minio_bucket,
                 secure=settings.minio_secure,
                 external_endpoint=settings.minio_external_endpoint,
-                region=settings.aws_region or "us-east-1",
+                region=settings.aws_region,
             )
 
             # Isolated prefix for strict microservices; default to "download/"

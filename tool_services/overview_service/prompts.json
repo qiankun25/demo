@@ -1,0 +1,7 @@
+{
+  "overview_markdown": {
+    "template": "You follow instructions precisely and output markdown only.",
+    "description": "System prompt used when calling the SiliconFlow overview model."
+  }
+}
+

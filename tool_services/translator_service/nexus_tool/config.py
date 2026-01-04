@@ -5,6 +5,7 @@ Translator service configuration for SiliconFlow multimodal translation.
 """
 
 import os
+from urllib.parse import quote_plus
 
 # Required in production; service will error if missing when calling SiliconFlow.
 SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY", "").strip()
@@ -17,4 +18,33 @@ DEFAULT_MODEL = os.getenv("SILICONFLOW_VISION_MODEL", "").strip() or os.getenv("
 TRANSLATE_MAX_TOKENS = int(os.getenv("TRANSLATE_MAX_TOKENS", "800"))
 TRANSLATE_TEMPERATURE = float(os.getenv("TRANSLATE_TEMPERATURE", "0.2"))
 TRANSLATE_TOP_P = float(os.getenv("TRANSLATE_TOP_P", "0.9"))
+
+def _build_translator_db_url() -> str:
+    explicit = os.getenv("TRANSLATOR_DB_URL", "").strip()
+    if explicit:
+        return explicit
+    host = os.getenv("DB_HOST", "").strip()
+    port = os.getenv("DB_PORT", "5432").strip()
+    name = os.getenv("DB_NAME", "").strip()
+    user = os.getenv("DB_USER", "").strip()
+    password = os.getenv("DB_PASSWORD", "").strip()
+    if not (host and name and user and password):
+        return ""
+    password_enc = quote_plus(password)
+    return f"postgresql+asyncpg://{user}:{password_enc}@{host}:{port}/{name}"
+
+def _build_translator_redis_url() -> str:
+    explicit = os.getenv("TRANSLATOR_REDIS_URL", "").strip()
+    if explicit:
+        return explicit
+    host = os.getenv("REDIS_HOST", "").strip()
+    port = os.getenv("REDIS_PORT", "6379").strip()
+    db = os.getenv("REDIS_DB", "0").strip()
+    if not host:
+        return ""
+    return f"redis://{host}:{port}/{db}"
+
+TRANSLATOR_DB_URL = _build_translator_db_url()
+TRANSLATOR_REDIS_URL = _build_translator_redis_url()
+TRANSLATOR_CACHE_TTL_SECONDS = max(0, int(os.getenv("TRANSLATOR_CACHE_TTL_SECONDS", "21600")))
 

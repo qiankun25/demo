@@ -22,7 +22,7 @@ class MinIOStorage:
         bucket: str,
         secure: bool = False,
         external_endpoint: str = None,
-        region: str = "us-east-1",
+        region: str = None,
     ):
         """Initialize MinIO client.
         
@@ -33,10 +33,12 @@ class MinIOStorage:
             bucket: Default bucket name for file storage
             secure: Whether to use HTTPS (default: False for development)
             external_endpoint: External endpoint for presigned URLs (optional, defaults to endpoint)
+            region: AWS region (optional, defaults to config value)
         """
-        # MinIO uses SigV4; region affects signing. We default to "us-east-1" which is
+        from app.config import settings
+        # MinIO uses SigV4; region affects signing. We default to config value which is
         # the typical MinIO default and also avoids a GetBucketLocation call during presign.
-        self.region = region
+        self.region = region or settings.aws_region_value
 
         # Internal client (used for bucket ops / uploads inside the docker network)
         self.client = Minio(
@@ -128,7 +130,7 @@ class MinIOStorage:
             logger.error(f"Failed to upload file {object_name}: {e}")
             raise
     
-    def get_presigned_url(self, object_name: str, expires: int = 3600) -> str:
+    def get_presigned_url(self, object_name: str, expires: int = None) -> str:
         """Generate presigned URL for secure file access.
         
         Creates a time-limited signed URL that allows temporary access to the file
@@ -136,7 +138,7 @@ class MinIOStorage:
         
         Args:
             object_name: Object path in MinIO (e.g., 'task_id/filename.pdf')
-            expires: URL expiration time in seconds (default: 3600 = 1 hour)
+            expires: URL expiration time in seconds (default: from config)
         
         Returns:
             str: Presigned URL for file access
@@ -144,6 +146,9 @@ class MinIOStorage:
         Raises:
             S3Error: If URL generation fails
         """
+        from app.config import settings
+        if expires is None:
+            expires = settings.presigned_url_expires
         try:
             # Convert seconds to timedelta as required by MinIO client
             expiry_timedelta = timedelta(seconds=expires)
@@ -174,7 +179,7 @@ def get_storage_service() -> MinIOStorage:
         _storage_service = MinIOStorage(
             endpoint=settings.minio_endpoint,
             external_endpoint=settings.minio_external_endpoint,
-            region=settings.aws_region or "us-east-1",
+            region=settings.aws_region,
             access_key=settings.minio_access_key,
             secret_key=settings.minio_secret_key,
             bucket=settings.minio_bucket,

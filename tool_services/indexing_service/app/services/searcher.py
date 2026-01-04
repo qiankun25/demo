@@ -52,10 +52,11 @@ class SearcherService:
         else:
             # PostgreSQL FTS implementation
             try:
-                sql = text("""
-                    SELECT chunk_id, ts_rank_cd(to_tsvector('english', text), plainto_tsquery('english', :q)) AS rank
+                lang = settings.FTS_LANGUAGE
+                sql = text(f"""
+                    SELECT chunk_id, ts_rank_cd(to_tsvector('{lang}', text), plainto_tsquery('{lang}', :q)) AS rank
                     FROM chunks
-                    WHERE to_tsvector('english', text) @@ plainto_tsquery('english', :q)
+                    WHERE to_tsvector('{lang}', text) @@ plainto_tsquery('{lang}', :q)
                     ORDER BY rank DESC LIMIT :l
                 """)
                 rows = db.execute(sql, {"q": query, "l": limit}).fetchall()
@@ -63,7 +64,9 @@ class SearcherService:
             except Exception:
                 return []
 
-    def _rrf(self, ranks: List[List[str]], k: int = 60) -> Dict[str, float]:
+    def _rrf(self, ranks: List[List[str]], k: Optional[int] = None) -> Dict[str, float]:
+        if k is None:
+            k = settings.RRF_K
         score: Dict[str, float] = {}
         for lst in ranks:
             for i, cid in enumerate(lst):
@@ -72,12 +75,13 @@ class SearcherService:
 
     async def search(self, db: Session, req: SearchRequest) -> SearchResponse:
         q = req.query.strip()
-        vec_hits = self._search_vector(q, limit=req.k * 3) if req.use_vector else []
-        fts_hits = self._search_fts(db, q, limit=req.k * 3) if req.use_fts else []
+        multiplier = settings.SEARCH_MULTIPLIER
+        vec_hits = self._search_vector(q, limit=req.k * multiplier) if req.use_vector else []
+        fts_hits = self._search_fts(db, q, limit=req.k * multiplier) if req.use_fts else []
 
         vec_rank = [cid for cid, _ in vec_hits]
         fts_rank = [cid for cid, _ in fts_hits]
-        fused = self._rrf([vec_rank, fts_rank], k=60)
+        fused = self._rrf([vec_rank, fts_rank])
 
         top = sorted(fused.items(), key=lambda x: x[1], reverse=True)[: req.k]
         hits: List[SearchHit] = []

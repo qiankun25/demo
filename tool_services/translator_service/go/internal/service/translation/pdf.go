@@ -76,13 +76,135 @@ type Block struct {
 
 // parsePDFToPages parses PDF bytes to pages
 func parsePDFToPages(pdfBytes []byte) ([]Page, error) {
-	// This is a placeholder implementation
+	// Basic PDF text extraction
 	// In production, would use a PDF parsing library like:
 	// - github.com/gen2brain/go-fitz (MuPDF bindings)
 	// - github.com/pdfcpu/pdfcpu
+	// - github.com/ledongthuc/pdf
 	
-	// For now, return empty pages
-	return []Page{}, nil
+	// For now, implement a basic text extraction from PDF
+	// This is a simplified version that extracts text content
+	// A full implementation would use a PDF library
+	
+	// Simple approach: extract text blocks from PDF
+	// This will be replaced with proper PDF parsing library
+	text := extractTextFromPDF(pdfBytes)
+	
+	// Split into pages (simplified - assume each page is separated by form feed or page break)
+	pages := []Page{}
+	pageTexts := strings.Split(text, "\f")
+	if len(pageTexts) == 1 {
+		// No form feed found, treat as single page
+		pageTexts = []string{text}
+	}
+	
+	for i, pageText := range pageTexts {
+		if strings.TrimSpace(pageText) == "" {
+			continue
+		}
+		
+		// Split into paragraphs
+		paragraphs := strings.Split(pageText, "\n\n")
+		blocks := []Block{}
+		
+		for _, para := range paragraphs {
+			para = strings.TrimSpace(para)
+			if para == "" {
+				continue
+			}
+			
+			// Simple heuristic: check if it's an equation (contains LaTeX-like patterns)
+			if strings.Contains(para, "$") || strings.Contains(para, "\\") {
+				blocks = append(blocks, Block{
+					Type:    "equation",
+					Content: para,
+				})
+			} else {
+				blocks = append(blocks, Block{
+					Type:    "text",
+					Content: para,
+				})
+			}
+		}
+		
+		if len(blocks) > 0 {
+			pages = append(pages, Page{
+				PageNum: i + 1,
+				Blocks:  blocks,
+			})
+		}
+	}
+	
+	if len(pages) == 0 {
+		// Fallback: create a single page with all text
+		pages = []Page{
+			{
+				PageNum: 1,
+				Blocks: []Block{
+					{
+						Type:    "text",
+						Content: text,
+					},
+				},
+			},
+		}
+	}
+	
+	return pages, nil
+}
+
+// extractTextFromPDF extracts text from PDF bytes
+// This is a simplified implementation - in production use a proper PDF library
+func extractTextFromPDF(pdfBytes []byte) string {
+	// Basic text extraction from PDF
+	// This is a placeholder - proper implementation would use a PDF library
+	
+	// For now, try to extract readable text from PDF structure
+	// PDF files contain text streams that can be extracted
+	// This is a very basic implementation
+	
+	content := string(pdfBytes)
+	
+	// Try to find text streams in PDF (between BT and ET markers)
+	// This is a simplified approach
+	var currentText strings.Builder
+	
+	// Look for text objects (simplified pattern matching)
+	// In a real implementation, we would parse the PDF structure properly
+	lines := strings.Split(content, "\n")
+	
+	for _, line := range lines {
+		// Skip PDF structure lines
+		if strings.HasPrefix(strings.TrimSpace(line), "%") ||
+			strings.HasPrefix(strings.TrimSpace(line), "/") ||
+			strings.Contains(line, "obj") ||
+			strings.Contains(line, "endobj") {
+			continue
+		}
+		
+		// Try to extract readable text
+		// Remove PDF control characters
+		cleanLine := strings.Map(func(r rune) rune {
+			if r >= 32 && r <= 126 || r == '\n' || r == '\r' {
+				return r
+			}
+			return ' '
+		}, line)
+		
+		cleanLine = strings.TrimSpace(cleanLine)
+		if len(cleanLine) > 3 && !strings.HasPrefix(cleanLine, "<<") && !strings.HasPrefix(cleanLine, ">>") {
+			currentText.WriteString(cleanLine)
+			currentText.WriteString(" ")
+		}
+	}
+	
+	extracted := currentText.String()
+	if extracted == "" {
+		// Fallback: return a message indicating PDF parsing is needed
+		return "PDF text extraction requires a proper PDF parsing library. Please install a PDF library for full functionality."
+	}
+	
+	return extracted
 }
 
 // processPage processes a single page

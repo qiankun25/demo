@@ -31,6 +31,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 8032 --reload
 - `DISCOVERY_CMD_ROUTING_KEY` / `DISCOVERY_CMD_QUEUE`
 - `DISCOVERY_DATABASE_URL`
 
+### 配置管理
+所有环境变量都由 `tool_services/discovery_service/settings.py` 中的 `DiscoverySettings` 管理，API、worker 和 `nexus_tool` 统一通过 `settings` 实例读取配置。常用字段包括数据库/消息队列配置（`discovery_database_url`、`rabbitmq_url`、`nexus_*`）、OpenAlex 相关参数（`openalex_*`）、缓存/速率限制（`discovery_cache_*`, `openalex_*`）、以及 `LOG_LEVEL` / `NEXUS_PREFETCH` 等。无需修改代码即可通过环境变量调整行为。
+
 ### 依赖（建议）
 - Postgres（结果索引 + inbox/outbox）
 - RabbitMQ（命令/事件）

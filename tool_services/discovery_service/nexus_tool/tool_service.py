@@ -46,7 +46,7 @@ try:
 except Exception:
     DiscoveryDB = None  # type: ignore
 
-from . import config  # noqa: E402
+from tool_services.discovery_service.settings import settings  # noqa: E402
 from .filters import encode_filters  # noqa: E402
 from .openalex_client import build_works_url, fetch_json_with_retry  # noqa: E402
 from .query_enhance import enhance_query  # noqa: E402
@@ -98,14 +98,14 @@ class DiscoveryToolService(BaseToolService):
         self._redis: Optional["Redis"] = None
 
     def _cache_enabled(self) -> bool:
-        return bool(config.REDIS_URL) and Redis is not None
+        return bool(settings.redis_connection_url) and Redis is not None
 
     async def _get_redis(self) -> Optional["Redis"]:
         if not self._cache_enabled():
             return None
         if self._redis is None:
             # decode_responses=False: keep bytes, we json.loads manually
-            self._redis = Redis.from_url(config.REDIS_URL, encoding=None, decode_responses=False)
+            self._redis = Redis.from_url(settings.redis_connection_url, encoding=None, decode_responses=False)
         return self._redis
 
     @staticmethod
@@ -124,8 +124,8 @@ class DiscoveryToolService(BaseToolService):
         注意：不包含 input_key，确保不同任务复用同一缓存结果。
         """
         obj = {
-            "openalex_base": config.OPENALEX_BASE,
-            "works_path": config.OPENALEX_WORKS_PATH,
+            "openalex_base": settings.openalex_base,
+            "works_path": settings.openalex_works_path,
             "enhanced_query": enhanced_query,
             "filter": filter_str,
             "per_page": per_page,
@@ -136,7 +136,7 @@ class DiscoveryToolService(BaseToolService):
         }
         raw = json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         digest = hashlib.sha256(raw).hexdigest()
-        return f"{config.DISCOVERY_CACHE_PREFIX}:{digest}"
+        return f"{settings.discovery_cache_prefix}:{digest}"
 
     async def _cache_get(self, cache_key: str) -> Optional[Dict[str, Any]]:
         r = await self._get_redis()
@@ -158,7 +158,7 @@ class DiscoveryToolService(BaseToolService):
             return
         try:
             payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            ttl = int(getattr(config, "DISCOVERY_CACHE_TTL_S", 3600))
+            ttl = settings.discovery_cache_ttl_s
             if ttl and ttl > 0:
                 await r.setex(cache_key, ttl, payload)
             else:
@@ -177,15 +177,15 @@ class DiscoveryToolService(BaseToolService):
         _cleaned, enhanced_query = enhance_query(raw_query)
         filters = payload.get("filters", {}) or {}
         limit = int(payload.get("limit", 20))
-        limit = max(1, min(limit, int(getattr(config, "DISCOVERY_LIMIT_MAX", 200))))
+        limit = max(1, min(limit, settings.discovery_limit_max))
         sample = payload.get("sample")
         seed = payload.get("seed")
 
-        mailto = self._normalize_mailto(payload.get("mailto") or config.OPENALEX_MAILTO or "")
-        select = self._normalize_select(payload.get("select") or config.DEFAULT_SELECT or "")
+        mailto = self._normalize_mailto(payload.get("mailto") or settings.openalex_mailto or "")
+        select = self._normalize_select(payload.get("select") or settings.default_select or "")
 
         strict_filters = bool(
-            getattr(config, "DISCOVERY_STRICT_FILTERS", False) or getattr(config, "DISCOVERY_STRICT_VALIDATION", False)
+            settings.discovery_strict_filters or settings.discovery_strict_validation
         )
 
         # Union semantics for journal/authors:
@@ -209,10 +209,10 @@ class DiscoveryToolService(BaseToolService):
         base_filter_str = encode_filters(
             filters_src,
             strict=strict_filters,
-            max_last_n_days=int(getattr(config, "DISCOVERY_MAX_LAST_N_DAYS", 3650)),
-            max_keys=int(getattr(config, "DISCOVERY_FILTERS_MAX_KEYS", 0) or 0) or None,
-            max_list_len=int(getattr(config, "DISCOVERY_FILTERS_MAX_LIST_LEN", 0) or 0) or None,
-            max_value_len=int(getattr(config, "DISCOVERY_FILTERS_MAX_VALUE_LEN", 0) or 0) or None,
+            max_last_n_days=settings.discovery_max_last_n_days,
+            max_keys=settings.discovery_filters_max_keys or None,
+            max_list_len=settings.discovery_filters_max_list_len or None,
+            max_value_len=settings.discovery_filters_max_value_len or None,
         )
 
         def _as_list(x: Any) -> List[str]:
@@ -286,8 +286,15 @@ class DiscoveryToolService(BaseToolService):
 
         metas_seen: List[Any] = []
         # When post-filtering, fetch a bit more to maintain chance of returning `limit` after filtering.
-        mult = int(getattr(config, "DISCOVERY_POSTFILTER_MULTIPLIER", 3) or 3)
-        fetch_n = limit if not postfilter_enabled else max(limit, min(limit * max(1, mult), int(getattr(config, "DISCOVERY_LIMIT_MAX", 200))))
+        mult = max(1, settings.discovery_postfilter_multiplier)
+        fetch_n = (
+            limit
+            if not postfilter_enabled
+            else max(
+                limit,
+                min(limit * max(1, mult), settings.discovery_limit_max),
+            )
+        )
 
         rs, m, u, rm = await _fetch_one(base_filter_str, per_page=fetch_n)
         all_results = rs or []
@@ -384,8 +391,7 @@ class DiscoveryToolService(BaseToolService):
         # Best-effort persist an index row in discovery_db so the Query API can resolve result_id -> output_key.
         if DiscoveryDB is not None:
             try:
-                db_url = os.getenv("DISCOVERY_DATABASE_URL") or os.getenv("DISCOVERY_DB_URL") or "sqlite:///./discovery.db"
-                db = DiscoveryDB.from_url(db_url)
+                db = DiscoveryDB.from_url(settings.database_url)
                 # P0: schema must be managed by migrations job (Alembic), not at runtime.
                 qh = hashlib.sha256(
                     json.dumps(
@@ -415,7 +421,7 @@ class DiscoveryToolService(BaseToolService):
         m = m.lower()
         # Minimal email validation (no hard dependency); strict mode can reject invalid
         if not re.match(r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", m):
-            if bool(getattr(config, "DISCOVERY_STRICT_MAILTO", False) or getattr(config, "DISCOVERY_STRICT_VALIDATION", False)):
+            if bool(settings.discovery_strict_mailto or settings.discovery_strict_validation):
                 raise ValueError(f"invalid mailto: {m!r}")
             return ""
         return m
@@ -424,9 +430,9 @@ class DiscoveryToolService(BaseToolService):
         s = str(select or "").strip()
         if not s:
             return ""
-        max_len = int(getattr(config, "DISCOVERY_SELECT_MAX_LEN", 0) or 0)
+        max_len = settings.discovery_select_max_len
         if max_len > 0 and len(s) > max_len:
-            if bool(getattr(config, "DISCOVERY_STRICT_SELECT", False) or getattr(config, "DISCOVERY_STRICT_VALIDATION", False)):
+            if bool(settings.discovery_strict_select or settings.discovery_strict_validation):
                 raise ValueError(f"select too long: {len(s)} > {max_len}")
             s = s[:max_len]
         parts = [p.strip() for p in s.split(",")]
@@ -437,7 +443,7 @@ class DiscoveryToolService(BaseToolService):
         for p in parts:
             # Field name should be OpenAlex-like identifier/path
             if not re.match(r"^[A-Za-z0-9_.-]+$", p):
-                if bool(getattr(config, "DISCOVERY_STRICT_SELECT", False) or getattr(config, "DISCOVERY_STRICT_VALIDATION", False)):
+                if bool(settings.discovery_strict_select or settings.discovery_strict_validation):
                     raise ValueError(f"invalid select field: {p!r}")
                 continue
             if p in seen:
@@ -445,22 +451,22 @@ class DiscoveryToolService(BaseToolService):
             seen.add(p)
             out.append(p)
 
-        max_fields = int(getattr(config, "DISCOVERY_SELECT_MAX_FIELDS", 0) or 0)
+        max_fields = settings.discovery_select_max_fields
         if max_fields > 0 and len(out) > max_fields:
-            if bool(getattr(config, "DISCOVERY_STRICT_SELECT", False) or getattr(config, "DISCOVERY_STRICT_VALIDATION", False)):
+            if bool(settings.discovery_strict_select or settings.discovery_strict_validation):
                 raise ValueError(f"too many select fields: {len(out)} > {max_fields}")
             out = out[:max_fields]
 
-        allowlist_raw = str(getattr(config, "DISCOVERY_SELECT_ALLOWLIST", "") or "").strip()
+        allowlist_raw = settings.discovery_select_allowlist.strip()
         if allowlist_raw:
             allow = {x.strip() for x in allowlist_raw.split(",") if x.strip()}
             unknown = [x for x in out if x not in allow]
-            if unknown and bool(getattr(config, "DISCOVERY_STRICT_SELECT", False) or getattr(config, "DISCOVERY_STRICT_VALIDATION", False)):
+            if unknown and bool(settings.discovery_strict_select or settings.discovery_strict_validation):
                 raise ValueError(f"select contains disallowed fields: {unknown}")
             filtered = [x for x in out if x in allow]
             if not filtered:
                 # non-strict: fallback to allowed subset of DEFAULT_SELECT (or empty)
-                default_parts = [p.strip() for p in str(getattr(config, "DEFAULT_SELECT", "") or "").split(",") if p.strip()]
+                default_parts = [p.strip() for p in settings.default_select.split(",") if p.strip()]
                 filtered = [p for p in default_parts if p in allow]
             out = filtered
 
@@ -474,18 +480,18 @@ class DiscoveryToolService(BaseToolService):
             try:
                 s_val = int(sample)
             except Exception:
-                if bool(getattr(config, "DISCOVERY_STRICT_VALIDATION", False)):
+                if settings.discovery_strict_validation:
                     raise ValueError(f"sample must be int, got: {sample!r}")
                 s_val = None
         if seed is not None and str(seed).strip() != "":
             try:
                 seed_val = int(seed)
             except Exception:
-                if bool(getattr(config, "DISCOVERY_STRICT_VALIDATION", False)):
+                if settings.discovery_strict_validation:
                     raise ValueError(f"seed must be int, got: {seed!r}")
                 seed_val = None
         # If seed provided without sample, OpenAlex may ignore; we keep but can be strict.
-        if seed_val is not None and s_val is None and bool(getattr(config, "DISCOVERY_STRICT_VALIDATION", False)):
+        if seed_val is not None and s_val is None and settings.discovery_strict_validation:
             raise ValueError("seed provided without sample")
         return s_val, seed_val
 

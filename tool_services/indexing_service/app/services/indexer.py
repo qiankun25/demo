@@ -45,7 +45,8 @@ class IndexerService:
         return out
 
     def _content_hash_from_chunks(self, chunks: List[Any]) -> str:
-        joined = "\n\n".join((c.text or "") for c in chunks)[:2_000_000]
+        max_length = settings.CONTENT_HASH_MAX_LENGTH
+        joined = "\n\n".join((c.text or "") for c in chunks)[:max_length]
         return hashlib.sha256(joined.encode("utf-8", errors="ignore")).hexdigest()
 
     async def index_document(self, db: Session, req: IndexRequest) -> IndexResponse:

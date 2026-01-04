@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from . import config
+from tool_services.discovery_service.settings import settings
 
 
 async def search_arxiv(query: str, max_results: int = 5, timeout: float = 15.0) -> List[Dict[str, Any]]:
@@ -33,7 +33,7 @@ async def search_arxiv(query: str, max_results: int = 5, timeout: float = 15.0) 
     }
     url = f"{base}?{urllib.parse.urlencode(params)}"
 
-    headers = {"User-Agent": getattr(config, "OPENALEX_USER_AGENT", "demo-openalex-client")}
+    headers = {"User-Agent": settings.openalex_user_agent}
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
             resp = await client.get(url)
@@ -90,7 +90,7 @@ async def search_semantic_scholar(
     if api_key:
         headers["x-api-key"] = api_key
 
-    client_headers = {"User-Agent": getattr(config, "OPENALEX_USER_AGENT", "demo-openalex-client")}
+    client_headers = {"User-Agent": settings.openalex_user_agent}
     attempts = 0
     backoff = 1.0
     while attempts < 3:

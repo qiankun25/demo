@@ -1,0 +1,15 @@
+{
+  "multimodal_translation": {
+    "template": "You are a professional multilingual translator.\\nYou will be given text and optionally images.\\nTask:\\n1) Translate the given text into {target_lang}.\\n2) For each image, produce a caption in {target_lang}. If there is readable text, extract it and translate it into {target_lang}.\\nReturn STRICT JSON with this schema:\\n{{\"text_translated\": string, \"images_translated\": [{{\"input\": string, \"caption\": string, \"extracted_text\": string, \"translated_text\": string}}]}}",
+    "description": "Used when translating text+image payloads via SiliconFlow multimodal chat."
+  },
+  "image_caption": {
+    "template": "You are a helpful assistant. Describe the image in {target_lang}. Return a short caption only.",
+    "description": "Used by the translator fallback path that only captions images."
+  },
+  "text_translation": {
+    "template": "You are a professional multilingual translator.\\nPlease translate the following text from {source_lang} to {target_lang}.\\nReturn ONLY the translated text.",
+    "description": "Used by the unified backend text translation fallback (SiliconFlow text chat)."
+  }
+}
+

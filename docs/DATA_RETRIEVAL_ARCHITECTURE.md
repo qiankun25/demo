@@ -1,174 +1,200 @@
-# Nexus 数据获取架构设计决策 (Data Retrieval Architecture Decision)
+# Nexus 数据获取架构设计决策（以当前仓库代码为准）
 
-## 1. 背景与需求
-- **场景**: 上层应用服务（Application Layer）需要根据前端的动态需求生成最终报告（如“学术早报”）。
-- **角色定位**:
-    - **Nexus**: 作为底层能力编排层（Orchestration Layer），负责调度工具并产生中间结果。
-    - **上层应用**: 作为业务逻辑中心，负责数据的组装、展示逻辑和最终报告生成。
-- **核心问题**: 上层应用如何从 Nexus 高效、灵活地获取任务执行结果？
+> 本文档说明“应用层如何从 Nexus 获取任务结果”的模式与接口，并**以当前仓库代码实现为准**。  
+> 推荐对照以下文件阅读：
+> - Nexus 路由：`nexus/app/api/routes.py`
+> - Status / Artifacts：`nexus/app/services/status_service.py`
+> - Report（标准化聚合）：`nexus/app/services/report_service.py`
+> - 状态存储（Orchestration DB）：`nexus/app/infrastructure/state_db.py`、`nexus/app/infrastructure/orchestration_db.py`
+> - 消息/合约（ref-only）：`nexus/app/models/messages.py`、`tool_services/libs/contracts/nexus_contracts/models.py`
 
-## 2. 核心决策：混合模式 (Hybrid Pattern) - 统一报告 API + Artifacts API
-采用 **"统一报告 API + 制品 API（保留用于高级场景）"** 的混合架构模式。
+---
 
-### 2.1 方案描述
-1.  **任务执行**: Nexus 的 Workflow 在执行过程中，将各步骤的输出（Search Result, Translation, Summary 等）作为独立制品（Artifacts）存储在 MinIO 中。
-2.  **清单生成**: 任务完成后，Nexus 生成一份 **制品清单 (Manifest)**，包含所有输出文件的元数据（Key/Path, Size, Type）。
-3.  **统一报告 API**: 新增 `GET /api/v1/jobs/{trace_id}/report` 端点，返回标准化的聚合报告（适合 80% 的使用场景）。
-4.  **制品 API（保留）**: 保留现有的 `GET /api/v1/jobs/{trace_id}/artifacts/{artifact_key}` 端点，用于高级场景（调试、特殊需求等）。
+## 1) 背景与需求
+- **场景**：上层应用（Application Layer）提交任务（如 `MORNING_REPORT` / `SUMMARY_REPORT`），等待编排完成后需要获取结果。
+- **核心诉求**：
+  - **80% 场景**：一次调用拿到“统一、稳定”的结果结构（标准化报告）
+  - **20% 场景**：可以按需拿到某个 stage 的“原始产物”（用于调试、验收、特殊展示）
 
-## 3. 架构模式分析
+---
 
-### 3.1 凭证检查模式 (Claim Check Pattern) - 变体
-- **传统**: 消息体传 ID，去数据库取大负载。
-- **本方案**: Nexus API 返回 MinIO 的 Object Key（凭证），上层应用通过 Nexus 代理获取实际数据。
-- **价值**: 避免了在消息总线或 API 响应体中直接传输大数据块。
+## 2) 核心决策：Hybrid = Report API（主入口） + Artifacts API（调试入口）
 
-### 3.2 流透传 (Stream Passthrough)
-- **机制**: Nexus API 从 MinIO 读取数据流，直接通过 HTTP Streaming Response 转发给上层应用。
-- **价值**:
-    - **零内存拷贝**: Nexus 不需要将整个文件加载到内存中解析。
-    - **低延迟**: 首字节（TTFB）极快。
-    - **隔离性**: 上层应用无需感知 MinIO 的存在（不需要 Access Key/Bucket Name），只与 HTTP API 交互。
+### 2.1 ref-only + artifacts_refs：用“隐式 manifest”替代“物理 manifest 文件”
+当前仓库的实现并没有生成一份独立的 Manifest 文件对象；而是把每个 stage 的产物输出以 **ResultRef** 的形式写入：
+- `JobContext.artifacts_refs`（逻辑索引）
+- Orchestration DB 的 `artifacts_index` 表（持久化索引）
 
-### 3.3 读时模式 (Schema on Read)
-- **机制**: 数据以原始/半结构化形式存储，读取时根据业务需求决定结构。
-- **价值**: 极大提升了灵活性。上层应用修改报告展示逻辑（如增加一个字段），无需修改 Nexus 代码或重新运行任务。
+因此：**`artifacts_refs` 就是“manifest-of-refs（隐式清单）”**。
 
-## 4. 方案演进与对比
+### 2.2 Report API：统一结构（推荐）
+- `GET /api/v1/jobs/{trace_id}/report`
+  - **返回**：标准化报告（`report_models.py` 中的 Pydantic 模型）
+  - **约束**：任务必须处于 `completed`；否则返回 400（`ReportService.build_report()`）
+  - **支持任务类型**：当前实现仅支持 `MORNING_REPORT` / `SUMMARY_REPORT`
 
-### 4.1 原方案（清单 + 流透传）的问题
-原方案虽然实现了"高内聚低耦合"，但存在以下问题：
-- **复杂度转移**：将数据格式转换的复杂度从 Nexus 转移到应用服务
-- **认知负担**：应用服务需要了解多个工具服务的数据格式（discovery, parser, translator, indexer 等）
-- **维护成本**：工具服务格式变更会直接影响应用服务代码
+### 2.3 Artifacts API：原始制品（高级/调试）
+- `GET /api/v1/jobs/{trace_id}/artifacts/{artifact_key}`
+  - **返回**：`application/json`
+  - **数据来源（非常重要）**：当前实现是 **Query API Proxy**  
+    即：根据 `artifacts_refs[artifact_key]` 的 `service/type/id` 去调用对应微服务 Query API，再把 JSON 返回（见 `StatusService.get_artifact_stream()`）
+  - **用途**：调试/验收/特殊需求场景；上层不必理解 MinIO path 或各服务 DB
 
-### 4.2 新方案（混合模式）的优势
+---
 
-| 维度 | 原方案: 清单 + 流透传 | 新方案: 统一报告 API + Artifacts API |
-| :--- | :--- | :--- |
-| **API 调用次数** | N+1 次（状态 + N个artifacts） | **1次**（统一报告）或 N+1次（高级场景） |
-| **数据格式复杂度** | 高（需了解多个工具格式） | **低**（统一标准化格式） |
-| **应用服务复杂度** | 高（需要数据转换和组装） | **低**（直接使用标准格式） |
-| **灵活性** | 高（可按需获取） | **高**（统一API + 保留artifacts API） |
-| **职责边界** | 模糊（应用服务做数据转换） | **清晰**（Nexus负责聚合，应用服务专注业务） |
-| **向后兼容** | - | **完全兼容**（保留artifacts API） |
+## 3) API 设计（以实际实现为准）
 
-## 5. 解决方案与 API 设计
+### 3.1 获取任务状态：`GET /api/v1/jobs/{trace_id}`
+见 `StatusService.get_job_status()`：
+- `status`：来自 `JobContext.current_stage`
+- `artifacts`：由 `artifacts_refs` 生成的 `{ artifact_key: download_url }` 映射
+- `pending_count`：`total - completed - failed`（且不为负）
 
-### 5.1 获取任务状态
-`GET /api/v1/jobs/{trace_id}`
-
-语义说明（结合实现 [routes.py](file:///d:/05_python/demo/nexus/app/api/routes.py) 与 [status_service.py](file:///d:/05_python/demo/nexus/app/services/status_service.py)）：
-- `artifacts` 是一个"制品索引（manifest of links）"，结构为：`{ artifact_key: download_url }`
-  - `artifact_key`：制品的逻辑名称/别名（用来标识"这是哪个制品"）
-  - `download_url`：可直接请求的下载地址（即 `GET /api/v1/jobs/{trace_id}/artifacts/{artifact_key}`）
-- `artifacts` 的 value 不是 MinIO 的 object key，也不是再次拼接的路径参数；它本身就是可用的 URL（通常是相对路径）。
+**示例（注意：artifacts 的 value 是 URL，不是存储 key）**：
 
 ```json
 {
   "trace_id": "uuid",
+  "task_type": "MORNING_REPORT",
   "status": "completed",
+  "total_work_items": 5,
+  "completed_count": 5,
+  "failed_count": 0,
+  "pending_count": 0,
   "artifacts": {
-    "search_results": "/api/v1/jobs/{trace_id}/artifacts/search_results",
-    "detailed_manifest": "/api/v1/jobs/{trace_id}/artifacts/detailed_manifest"
-  }
+    "discovery": "/api/v1/jobs/uuid/artifacts/discovery",
+    "search_results": "/api/v1/jobs/uuid/artifacts/search_results",
+    "downloader:task:uuid:work:0": "/api/v1/jobs/uuid/artifacts/downloader:task:uuid:work:0",
+    "parser:task:uuid:work:0": "/api/v1/jobs/uuid/artifacts/parser:task:uuid:work:0",
+    "indexer:task:uuid:work:0": "/api/v1/jobs/uuid/artifacts/indexer:task:uuid:work:0"
+  },
+  "failures": []
 }
 ```
 
-### 5.2 获取标准化报告（推荐 - 80% 场景）
-`GET /api/v1/jobs/{trace_id}/report`
-- **Response**: `application/json` - 标准化的聚合报告
-- **Behavior**: Nexus 自动聚合所有相关 artifacts，转换为统一的业务层数据模型
+> artifact_key 的集合会随任务类型、work_key 数量、以及是否存在别名归档而变化；应用层应以 API 返回为准。
 
-**优势**：
-- **简单易用**：一次 API 调用即可获取完整报告
-- **统一格式**：应用服务只需理解一种标准格式，无需了解底层工具服务的数据结构
-- **职责清晰**：数据格式转换和聚合逻辑集中在 Nexus，应用服务专注于业务逻辑
+### 3.2 获取标准化报告：`GET /api/v1/jobs/{trace_id}/report`
 
-**响应格式示例（MORNING_REPORT）**：
+#### MORNING_REPORT（当前实现的真实语义）
+见 `ReportService.build_morning_report()` + `_build_paper_ref_only()`：
+- `papers[]` 来自 `completed_work_keys`
+- paper 元数据主要来自 `JobContext.metadata["work_meta"][work_key]`（由 discovery handler 写入）
+- `summary.llm_summary` 当前是 lightweight 实现：从 parser 的 `chunks[0].text` 截断到 800 字（不依赖 LLM）
+- `index` 当前为占位（`IndexInfo()` 默认空）
+- `keys` 字段保留但在 ref-only 场景通常为 `null`
+
+**示例（字段以 `nexus/app/models/report_models.py` 为准）**：
+
 ```json
 {
   "trace_id": "uuid",
   "task_type": "MORNING_REPORT",
   "requested_limit": 5,
-  "paper_count": 3,
+  "paper_count": 1,
   "papers": [
     {
       "paper": {
         "title": "Paper Title",
-        "authors": ["Author 1", "Author 2"],
-        "pdf_url": "http://example.com/paper.pdf",
+        "authors": ["Author 1"],
+        "pdf_url": "https://example.com/paper.pdf",
         "openalex_id": "W123",
         "doi": "10.1234/example",
         "publication_date": "2024-01-01",
-        "original_url": "http://example.com/paper.pdf"
+        "original_url": "https://example.com/paper.pdf"
       },
       "summary": {
-        "llm_summary": "This is a summary of the paper..."
+        "llm_summary": "..."
       },
       "index": {
-        "collection": "default",
-        "vector_count": 10,
-        "persist_dir": "/path/to/vectors"
+        "collection": null,
+        "vector_count": null,
+        "persist_dir": null
       },
       "keys": {
         "work_key": "task:uuid:work:0",
-        "download_key": "data:download:data:work:task:uuid:work:0",
-        "parse_key": "data:parse:data:download:data:work:task:uuid:work:0",
-        "index_key": "data:index:data:parse:data:download:data:work:task:uuid:work:0"
+        "download_key": null,
+        "parse_key": null,
+        "index_key": null
       }
     }
   ],
   "failure_count": 0,
   "failures": [],
   "keys": {
-    "init_key": "job:uuid:init",
-    "discovery_key": "data:discovery:job:uuid:input"
+    "init_key": null,
+    "discovery_key": null
   },
   "input": {
     "query": "large language model",
-    "filters": {"publication_year": "2024"}
+    "filters": {
+      "publication_year": "2024"
+    }
   }
 }
 ```
 
-### 5.3 获取特定制品 (流式) - 高级场景
-`GET /api/v1/jobs/{trace_id}/artifacts/{artifact_key}`
-- **Response**: `application/json` (Streamed)
-- **Behavior**: Nexus reads stream from MinIO -> Writes stream to HTTP Response.
-- **用途**：调试、特殊需求、需要访问原始工具服务数据格式的场景
+#### SUMMARY_REPORT（当前实现的真实语义）
+见 `ReportService.build_summary_report()`：
+- `overview_md`：通过 `artifacts_refs["overview"]` 指向的 `overview_service` Query API 拉取
+- `paper_count`：优先从 overview meta 读取
 
-关键点：
-- `{artifact_key}` 来自 `GET /api/v1/jobs/{trace_id}` 返回的 `artifacts` 对象的"键名"，例如上面的 `search_results`、`detailed_manifest`。
-- 调用时二选一即可：
-  1) 直接请求 `artifacts` 给你的 `download_url`
-  2) 把 `artifact_key` 填到该接口路径参数里
+```json
+{
+  "trace_id": "uuid",
+  "task_type": "SUMMARY_REPORT",
+  "overview_md": "## Background\n...",
+  "meta": {"paper_count": 3},
+  "paper_count": 3
+}
+```
 
-补充：关于"内部 key（存储 key）"
-- Nexus 内部确实存在 MinIO 的 object key（例如 `data:manifest:{trace_id}`、`data:parse:...`），它们是存储层的定位符。
-- 正常情况下，上层应用不需要关心这些 key，只需要使用 `download_url`。
-- 若你从 `detailed_manifest` 中拿到了某个 `data:*` key，并且它属于当前任务，上述接口也支持直接把该 `data:*` key 作为 `{artifact_key}` 传入进行拉取。
+### 3.3 获取原始制品：`GET /api/v1/jobs/{trace_id}/artifacts/{artifact_key}`
+见 `StatusService.get_artifact_stream()`，当前支持的 ref → Query API 映射如下（按 `service/type` 判断）：
+- `discovery/search_result` → `GET {discovery_base_url}/v1/results/{id}`
+- `parser/parsed_doc` → `GET {parser_base_url}/v1/parsed/{id}`
+- `download/file` → `GET {download_base_url}/v1/files/{id}/signed_url`
+- `overview/overview_report` → `GET {overview_base_url}/v1/reports/{id}`
 
-反例（你遇到的 404 根因）：
-- 不要把 `download_url`（例如 `/api/v1/jobs/.../artifacts/search_results`）整体 URL-encode 后再塞进 `{artifact_key}`。
-- 这会导致实际请求变成：`/artifacts/%2Fapi%2Fv1%2Fjobs%2F...%2Fartifacts%2Fsearch_results`，此时 `{artifact_key}` 的值已经是"整段路径字符串"，当然无法命中实际制品。
+> 这意味着 `/artifacts/*` 的 JSON 结构 **由各微服务 API 决定**；Nexus 只做“ref → API → JSON”的代理。
 
-## 6. 总结
+---
 
-### 6.1 设计原则
-该混合模式设计遵循以下原则：
-1. **80/20 原则**：为 80% 的常见场景提供简单统一的 API，为 20% 的高级场景保留灵活的 artifacts API
-2. **职责清晰**：Nexus 作为编排层，负责数据格式的统一与标准化，向应用层提供简洁统一的接口
-3. **向后兼容**：保留现有的 artifacts API，确保现有客户端不受影响
-4. **降低复杂度**：应用服务只需理解统一的业务模型，无需了解底层工具服务的实现细节
+## 4) 模式解释（为什么这样设计）
 
-### 6.2 使用建议
-- **常规使用场景**（推荐）：使用 `GET /api/v1/jobs/{trace_id}/report` 获取标准化报告
-- **高级场景**（调试、特殊需求）：使用 `GET /api/v1/jobs/{trace_id}/artifacts/{artifact_key}` 访问原始数据
-- **迁移路径**：现有使用 artifacts API 的代码可以继续工作，新代码建议使用统一报告 API
+### 4.1 Claim-check（ref-only 变体）
+- MQ 只承载控制面（trace/work_key/params/ref），不承载大对象
+- 大对象（PDF、parsed chunks、overview 报告等）由 owning service 自治存储（MinIO/DB/Chroma）
 
-### 6.3 实现要点
-- ReportService 负责从多个 artifacts 聚合数据并转换为标准化格式
-- 支持 MORNING_REPORT 和 SUMMARY_REPORT 两种任务类型
-- 自动处理 manifest 或从 work_keys 重建数据
-- 完善的错误处理和日志记录
+### 4.2 Schema-on-read（读时组装）
+- Report API 负责向业务层提供稳定模型
+- 工具服务的内部结构可演进，上层应用不需要同步理解所有“原始格式”
+
+### 4.3 为什么 artifacts 不是 “MinIO stream passthrough”
+在当前仓库里：
+- Nexus `/artifacts/*` 走的是 Query API Proxy（见 `StatusService.get_artifact_stream()`）
+- 对 `download/file` 这类二进制对象，最佳实践是由 download_service 提供 signed URL；Nexus 返回 JSON（上层再拉 signed URL）
+
+---
+
+## 5) 常见坑（结合真实代码）
+
+### 5.1 不要把 artifacts 的 URL 当成 artifact_key
+正确方式：
+- 从 `GET /jobs/{trace_id}` 返回的 `artifacts` 字典里取 key（例如 `search_results`）
+- 直接请求 value（URL），或把 key 填到 `/artifacts/{artifact_key}`
+
+错误方式（会 404）：
+- 把 `download_url` 整段 URL encode 后塞进 `{artifact_key}`
+
+### 5.2 SUMMARY_REPORT “卡在 processing” 的自愈
+当前代码中 `StatusService.get_job_status()` 存在 best-effort reconcile：
+- 如果发现 SUMMARY_REPORT 已经满足 “completed+failed >= total”，但 stage 仍为 `processing`
+- 会触发一次 `orchestrator._check_completion(trace_id)` 尝试补发 `cmd.overview.start` 或直接完成
+
+---
+
+## 6) 应用层使用建议
+- **默认只用 report**：`GET /api/v1/jobs/{trace_id}/report`
+- **需要排查/高级需求再用 artifacts**：`GET /api/v1/jobs/{trace_id}/artifacts/{artifact_key}`
+- **需要二进制 PDF**：先通过 artifacts 拿到 signed_url（download_service 返回），再直接拉 signed_url

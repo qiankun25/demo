@@ -18,13 +18,13 @@ router = APIRouter(prefix="/files", tags=["files"])
 class SignedURLResponse(BaseModel):
     file_id: str
     url: str = Field(..., description="Presigned download URL")
-    expires_seconds: int = 3600
+    expires_seconds: int
 
 
 @router.get("/{file_id}/signed_url", response_model=SignedURLResponse)
 async def get_signed_url(
     file_id: str,
-    expires: int = 3600,
+    expires: int = None,
     session: AsyncSession = Depends(get_async_session),
 ) -> SignedURLResponse:
     try:
@@ -37,6 +37,13 @@ async def get_signed_url(
     if not f:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 
+    # Use default expiration from config if not provided
+    if expires is None:
+        expires = settings.presigned_url_expires
+    
+    # Clamp expires value between min and max
+    expires_clamped = max(settings.presigned_url_min_expires, min(expires, settings.presigned_url_max_expires))
+    
     storage = MinIOStorage(
         endpoint=settings.minio_endpoint,
         access_key=settings.minio_access_key,
@@ -44,9 +51,9 @@ async def get_signed_url(
         bucket=f.minio_bucket,
         secure=settings.minio_secure,
         external_endpoint=settings.minio_external_endpoint,
-        region=settings.aws_region or "us-east-1",
+        region=settings.aws_region,
     )
-    url = storage.get_presigned_url(object_name=f.minio_object, expires=max(60, min(expires, 3600 * 24)))
-    return SignedURLResponse(file_id=str(f.id), url=url, expires_seconds=max(60, min(expires, 3600 * 24)))
+    url = storage.get_presigned_url(object_name=f.minio_object, expires=expires_clamped)
+    return SignedURLResponse(file_id=str(f.id), url=url, expires_seconds=expires_clamped)
 
 

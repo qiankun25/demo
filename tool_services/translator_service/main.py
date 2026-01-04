@@ -1,19 +1,31 @@
+import base64
+import hashlib
+import json
+import mimetypes
 import os
 import sys
-import json
-import base64
-import mimetypes
 import time
-from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import FastAPI, HTTPException, Body, status
+from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from redis.asyncio import Redis
+from sqlalchemy import Column, DateTime, MetaData, String, Table, Text, func, insert, literal_column, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-# Ensure we can import from the current directory
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SERVICE_DIR, "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+if SERVICE_DIR not in sys.path:
+    sys.path.insert(0, SERVICE_DIR)
+
 from nexus_tool import config
+from tool_services.translator_service import prompt_config
 from unified_backend.router import router as unified_router
 from unified_backend.core.image_translate import translate_image_bytes as baidu_translate_image_bytes
 
@@ -25,6 +37,34 @@ app = FastAPI(
 
 # 挂载新版 unified_backend 的增强接口（保持端口不变）
 app.include_router(unified_router)
+
+metadata = MetaData()
+glossary_table = Table(
+    "translator_glossary",
+    metadata,
+    Column("term", String(128), primary_key=True),
+    Column("definition", Text, nullable=False),
+    Column("domain", String(64), nullable=False, server_default="research"),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False),
+)
+
+glossary_engine = (
+    create_async_engine(config.TRANSLATOR_DB_URL, future=True)
+    if config.TRANSLATOR_DB_URL
+    else None
+)
+glossary_sessionmaker = (
+    async_sessionmaker(glossary_engine, expire_on_commit=False)
+    if glossary_engine
+    else None
+)
+
+redis_client: Optional[Redis] = None
+if config.TRANSLATOR_REDIS_URL:
+    redis_client = Redis.from_url(config.TRANSLATOR_REDIS_URL, decode_responses=True)
+
+CACHE_KEY_PREFIX = "translator:cache:"
 
 class TranslateRequest(BaseModel):
     text: str = Field("", description="原文内容")
@@ -41,6 +81,92 @@ class TranslateResponse(BaseModel):
     text_translated: str
     images_translated: List[ImageTranslation]
     meta: Dict[str, Any]
+
+
+class GlossaryTermResponse(BaseModel):
+    term: str
+    definition: str
+    domain: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class GlossaryCreateRequest(BaseModel):
+    term: str = Field(..., min_length=1, description="术语名称（唯一）")
+    definition: str = Field(..., min_length=1, description="术语对应的解释或指定翻译")
+    domain: str = Field("research", description="所属领域/语料（默认 research）")
+
+
+class GlossaryUpdateRequest(BaseModel):
+    definition: Optional[str]
+    domain: Optional[str]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _require_at_least_one(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        if not values.get("definition") and not values.get("domain"):
+            raise ValueError("提供 definition 或 domain 至少其一")
+        return values
+
+
+def _glossary_row_to_payload(row: Any) -> Dict[str, Any]:
+    mapping = row._mapping if hasattr(row, "_mapping") else row
+    return {
+        "term": mapping["term"],
+        "definition": mapping["definition"],
+        "domain": mapping.get("domain") or "research",
+        "created_at": mapping["created_at"],
+        "updated_at": mapping["updated_at"],
+    }
+
+
+def _translation_cache_key(req: TranslateRequest) -> str:
+    normalized = {
+        "text": (req.text or "").strip(),
+        "images": req.images or [],
+        "target_lang": (req.target_lang or "").strip().lower(),
+    }
+    canonical = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+    key_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"{CACHE_KEY_PREFIX}{key_hash}"
+
+
+async def _get_cached_translation(cache_key: str) -> Optional[TranslateResponse]:
+    if not redis_client:
+        return None
+    try:
+        payload = await redis_client.get(cache_key)
+    except Exception:
+        return None
+    if not payload:
+        return None
+    try:
+        data = json.loads(payload)
+        return TranslateResponse.model_validate(data)
+    except Exception:
+        try:
+            await redis_client.delete(cache_key)
+        except Exception:
+            pass
+        return None
+
+
+async def _set_cached_translation(cache_key: str, resp: TranslateResponse) -> None:
+    if not redis_client or not cache_key or config.TRANSLATOR_CACHE_TTL_SECONDS <= 0:
+        return
+    try:
+        await redis_client.set(
+            cache_key,
+            resp.model_dump_json(),
+            ex=config.TRANSLATOR_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        pass
+
+
+class PromptUpdateRequest(BaseModel):
+    template: str = Field(..., min_length=1, description="Template for the system prompt")
+    description: Optional[str] = Field(None, description="Optional explanation of the prompt's intent")
 
 def _to_image_part(image_ref: str) -> Dict[str, Any]:
     ref = (image_ref or "").strip()
@@ -118,6 +244,8 @@ async def _caption_image_siliconflow(image_ref: str, target_lang: str) -> str:
     if not config.SILICONFLOW_API_KEY:
         return ""
 
+    system_prompt = prompt_config.render_prompt("image_caption", target_lang=target_lang)
+
     headers = {
         "Authorization": f"Bearer {config.SILICONFLOW_API_KEY}",
         "Content-Type": "application/json",
@@ -127,7 +255,7 @@ async def _caption_image_siliconflow(image_ref: str, target_lang: str) -> str:
         "messages": [
             {
                 "role": "system",
-                "content": f"You are a helpful assistant. Describe the image in {target_lang}. Return a short caption only.",
+                "content": system_prompt,
             },
             {"role": "user", "content": [{"type": "text", "text": "Describe this image."}, _to_image_part(image_ref)]},
         ],
@@ -147,15 +275,7 @@ async def _caption_image_siliconflow(image_ref: str, target_lang: str) -> str:
     return ""
 
 async def _translate_multimodal(text: str, images: List[str], target_lang: str) -> Dict[str, Any]:
-    system_prompt = (
-        "You are a professional multilingual translator.\n"
-        "You will be given text and optionally images.\n"
-        "Task:\n"
-        f"1) Translate the given text into {target_lang}.\n"
-        f"2) For each image, produce a caption in {target_lang}. If there is readable text, extract it and translate it into {target_lang}.\n"
-        "Return STRICT JSON with this schema:\n"
-        '{"text_translated": string, "images_translated": [{"input": string, "caption": string, "extracted_text": string, "translated_text": string}]}'
-    )
+    system_prompt = prompt_config.render_prompt("multimodal_translation", target_lang=target_lang)
 
     user_parts: List[Dict[str, Any]] = []
     if text:
@@ -272,11 +392,83 @@ async def health_ready():
     if not (has_siliconflow or has_baidu):
         ok = False
 
+    if redis_client:
+        try:
+            await redis_client.ping()
+            components["redis_cache"] = "healthy"
+        except Exception:
+            components["redis_cache"] = "unhealthy"
+            ok = False
+    else:
+        components["redis_cache"] = "disabled"
+
+    if glossary_engine:
+        try:
+            async with glossary_engine.connect() as conn:
+                await conn.execute(select(literal_column("1")))
+            components["glossary_db"] = "healthy"
+        except Exception:
+            components["glossary_db"] = "unhealthy"
+            ok = False
+    else:
+        components["glossary_db"] = "disabled"
+
     status_code = status.HTTP_200_OK if ok else status.HTTP_503_SERVICE_UNAVAILABLE
     return JSONResponse(status_code=status_code, content={"status": "ready" if ok else "not ready", "components": components})
 
+
+@app.on_event("startup")
+async def _ensure_glossary_tables():
+    if glossary_engine:
+        async with glossary_engine.begin() as conn:
+            await conn.run_sync(metadata.create_all)
+
+
+@app.on_event("shutdown")
+async def _cleanup_resources():
+    if redis_client:
+        await redis_client.close()
+    if glossary_engine:
+        await glossary_engine.dispose()
+
+
+def _format_prompt_entry(key: str, entry: Dict[str, str]) -> Dict[str, str]:
+    return {
+        "key": key,
+        "template": entry.get("template", ""),
+        "description": entry.get("description", "") or "",
+    }
+
+
+@app.get("/prompts")
+async def list_prompts():
+    return {"prompts": [_format_prompt_entry(k, v) for k, v in prompt_config.list_prompts().items()]}
+
+
+@app.get("/prompts/{prompt_key}")
+async def get_prompt(prompt_key: str):
+    entry = prompt_config.get_prompt_entry(prompt_key)
+    if not entry:
+        raise HTTPException(status_code=404, detail="prompt not found")
+    return _format_prompt_entry(prompt_key, entry)
+
+
+@app.put("/prompts/{prompt_key}")
+async def update_prompt(prompt_key: str, req: PromptUpdateRequest):
+    try:
+        updated = prompt_config.update_prompt(prompt_key, template=req.template, description=req.description)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _format_prompt_entry(prompt_key, updated)
+
+
 @app.post("/translate", response_model=TranslateResponse)
 async def translate(req: TranslateRequest):
+    cache_key = _translation_cache_key(req)
+    cached = await _get_cached_translation(cache_key)
+    if cached:
+        return cached
+
     try:
         # 1) 文本翻译（沿用旧 SiliconFlow 模型；如果没提供文本则跳过）
         text_translated = ""
@@ -330,17 +522,117 @@ async def translate(req: TranslateRequest):
         
         meta = {
             "target_lang": req.target_lang,
-            "image_count": len(req.images),
+            "image_count": len(req.images or []),
             "model": model_used or (config.DEFAULT_MODEL if config.SILICONFLOW_API_KEY else "baidu")
         }
         
-        return TranslateResponse(
+        response = TranslateResponse(
             text_translated=text_translated,
             images_translated=images_out,
             meta=meta
         )
+        await _set_cached_translation(cache_key, response)
+        return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _assert_glossary_enabled():
+    if not glossary_sessionmaker:
+        raise HTTPException(status_code=503, detail="Glossary database not configured")
+
+
+@app.get("/glossary")
+async def list_glossary(domain: Optional[str] = None):
+    _assert_glossary_enabled()
+    async with glossary_sessionmaker() as session:
+        stmt = select(glossary_table)
+        if domain:
+            stmt = stmt.where(glossary_table.c.domain == domain)
+        stmt = stmt.order_by(glossary_table.c.term)
+        result = await session.execute(stmt)
+        terms = [
+            GlossaryTermResponse.model_validate(_glossary_row_to_payload(row)).model_dump()
+            for row in result.fetchall()
+        ]
+    return {"terms": terms}
+
+
+@app.get("/glossary/{term}", response_model=GlossaryTermResponse)
+async def get_glossary_term(term: str):
+    _assert_glossary_enabled()
+    normalized_term = (term or "").strip()
+    if not normalized_term:
+        raise HTTPException(status_code=400, detail="term required")
+    async with glossary_sessionmaker() as session:
+        result = await session.execute(
+            select(glossary_table).where(glossary_table.c.term == normalized_term)
+        )
+        row = result.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"term {normalized_term} not found")
+    return GlossaryTermResponse.model_validate(_glossary_row_to_payload(row))
+
+
+@app.post("/glossary", response_model=GlossaryTermResponse, status_code=201)
+async def create_glossary(req: GlossaryCreateRequest):
+    _assert_glossary_enabled()
+    term_value = req.term.strip()
+    if not term_value:
+        raise HTTPException(status_code=400, detail="term required")
+    definition_value = req.definition.strip()
+    if not definition_value:
+        raise HTTPException(status_code=400, detail="definition required")
+    domain_value = (req.domain or "research").strip() or "research"
+
+    async with glossary_sessionmaker() as session:
+        stmt = (
+            insert(glossary_table)
+            .values(term=term_value, definition=definition_value, domain=domain_value)
+            .returning(*glossary_table.c)
+        )
+        try:
+            result = await session.execute(stmt)
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            raise HTTPException(status_code=409, detail=f"Glossary term {term_value} already exists")
+        row = result.fetchone()
+    if not row:
+        raise HTTPException(status_code=500, detail="failed to persist glossary entry")
+    return GlossaryTermResponse.model_validate(_glossary_row_to_payload(row))
+
+
+@app.put("/glossary/{term}", response_model=GlossaryTermResponse)
+async def update_glossary(term: str, req: GlossaryUpdateRequest):
+    _assert_glossary_enabled()
+    normalized_term = (term or "").strip()
+    if not normalized_term:
+        raise HTTPException(status_code=400, detail="term required")
+    updated_values: Dict[str, Any] = {}
+    if req.definition is not None:
+        definition_value = req.definition.strip()
+        if not definition_value:
+            raise HTTPException(status_code=400, detail="definition cannot be empty")
+        updated_values["definition"] = definition_value
+    if req.domain is not None:
+        updated_values["domain"] = req.domain.strip() or "research"
+    if not updated_values:
+        raise HTTPException(status_code=400, detail="no changes provided")
+
+    stmt = (
+        update(glossary_table)
+        .where(glossary_table.c.term == normalized_term)
+        .values(**updated_values, updated_at=func.now())
+        .returning(*glossary_table.c)
+    )
+    async with glossary_sessionmaker() as session:
+        result = await session.execute(stmt)
+        await session.commit()
+        row = result.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"term {normalized_term} not found")
+    return GlossaryTermResponse.model_validate(_glossary_row_to_payload(row))
 
 if __name__ == "__main__":
     import uvicorn

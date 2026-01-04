@@ -52,15 +52,23 @@ class RetrievalToolService(BaseToolService):
         if not isinstance(payload, dict):
             raise ValueError("params must be a dict")
 
+        # Import settings to get config values
+        from app.config import settings
+        
         query = (payload.get("query") or "").strip()
-        top_k = int(payload.get("top_k", 5))
+        limits = settings.limits
+        top_k = int(payload.get("top_k", limits.get("search_k_default", 5)))
 
         local_hits = await self._search_local(query, top_k)
         external_hits: List[Dict[str, Any]] = []  # 不做外部发现
         combined = local_hits[:top_k] if local_hits else []
 
-        out_id = hashlib.sha256(query.encode("utf-8")).hexdigest()[:24]
-        output_key = f"retrieval/results/{out_id}.json"
+        query_id_length = settings.query_id_hash_length
+        out_id = hashlib.sha256(query.encode("utf-8")).hexdigest()[:query_id_length]
+        constants = settings.constants
+        storage = constants.get("storage", {})
+        retrieval_results_prefix = storage.get("retrieval_results_prefix", "retrieval/results/")
+        output_key = f"{retrieval_results_prefix}{out_id}.json"
         await MockStorage.save(
             output_key,
             {"query": query, "local_hits": local_hits, "external_hits": external_hits, "combined": combined},
@@ -69,10 +77,15 @@ class RetrievalToolService(BaseToolService):
 
     async def _search_local(self, query: str, top_k: int) -> List[Dict[str, Any]]:
         """在 MinIO(Claim Check) 中遍历解析产物，做简单关键词匹配。"""
+        from app.config import settings
+        
         hits: List[Tuple[float, Dict[str, Any]]] = []
-        scan_limit = int(os.getenv("RETRIEVAL_LOCAL_SCAN_LIMIT", "50"))
+        scan_limit = settings.local_scan_limit
         # Ref-only mode: parse outputs live under parser/ prefix
-        keys = await MockStorage.list_keys("parser/parsed:")
+        constants = settings.constants
+        storage = constants.get("storage", {})
+        parser_parsed_prefix = storage.get("parser_parsed_prefix", "parser/parsed:")
+        keys = await MockStorage.list_keys(parser_parsed_prefix)
         for k in keys[:scan_limit]:
             v = await MockStorage.get(k)
             if not isinstance(v, dict):

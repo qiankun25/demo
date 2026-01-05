@@ -310,13 +310,10 @@ Event 是 tool service → Nexus 的“响应”。同样使用 `MessagePackage(
 ## 4) 两条关键链路（时序图）
 
 ### 4.1 MORNING_REPORT：discovery → downloader(fan-out) → parser → indexer
-
 ![MORNING_REPORT](./学术早报BPMN.png)
+
 ### 4.2 SUMMARY_REPORT：提交时 fan-out downloader → parser → fan-in overview
-
 ![SUMMARY_REPORT](./综述报告BPMN.png)
-
-
 
 ---
 
@@ -356,5 +353,279 @@ Event 是 tool service → Nexus 的“响应”。同样使用 `MessagePackage(
 - **职责**：文本/图片多模态翻译；对外 API + unified_backend
 - **HTTP**：`/translate`、健康检查三件套
 - **DB**：Postgres + Redis
+
+---
+
+## 6) Application Service（用户服务与应用层）
+
+### 6.1 职责与定位
+
+Application Service 是面向用户的应用层服务，位于前端与底层微服务（Nexus Orchestration Service、Indexing Service、Translator Service 等）之间，提供：
+
+- **用户认证与授权**：用户注册、登录、会话管理
+- **订阅管理**：用户学术订阅（期刊、学者、关键词）的 CRUD 操作
+- **业务功能代理**：将前端请求转发到相应的底层服务，并进行数据格式转换
+  - 学术日报：代理到 Nexus Orchestration Service 的 `MORNING_REPORT` 任务
+  - 文献综述：代理到 Nexus Orchestration Service 的 `SUMMARY_REPORT` 任务
+  - 文献检索：代理到 Indexing Service 的 `/search` API
+  - 文献翻译：代理到 Translator Service 的 `/translate-paper` API
+
+### 6.2 技术架构
+
+**技术栈**：
+- **Web 框架**：FastAPI（Python）
+- **ORM**：SQLAlchemy
+- **数据库**：PostgreSQL（用户数据、订阅数据）
+- **HTTP 客户端**：`requests`（调用下游服务）
+
+**目录结构**（`application_service/`）：
+```
+application_service/
+├── main.py              # FastAPI 应用入口，路由注册
+├── config.py            # 配置管理（环境变量）
+├── database.py          # 数据库连接与 Session 管理
+├── models.py            # SQLAlchemy 数据模型（User, UserSubscription）
+├── schemas.py           # Pydantic 请求/响应模型
+├── auth.py              # 密码哈希与验证工具
+├── routers/             # 路由模块
+│   ├── auth.py          # 认证路由（注册、登录）
+│   ├── subscriptions.py  # 订阅管理路由
+│   ├── morning_report.py # 学术日报路由
+│   ├── literature_review.py    # 文献综述路由
+│   ├── literature_search.py    # 文献检索路由
+│   └── literature_translation.py # 文献翻译路由
+└── requirements.txt     # Python 依赖
+```
+
+### 6.3 数据模型
+
+**User（用户表）**：
+- `id`（BigInteger，主键）
+- `username`（String(50)，唯一，索引）
+- `email`（String(100)，唯一，索引）
+- `password_hash`（String(255)）
+- `subscriptions`（关系：一对多，UserSubscription）
+
+**UserSubscription（订阅表）**：
+- `id`（BigInteger，主键）
+- `user_id`（BigInteger，外键 → User.id，CASCADE 删除）
+- `subscription_type`（String(20)）：`"journal"` / `"scholar"` / `"keyword"`
+- `subscription_value`（String(100)）
+- 唯一约束：`(user_id, subscription_type, subscription_value)`
+
+### 6.4 API 设计
+
+**认证机制**：
+- 当前实现使用 **请求头 `X-User-ID`** 传递用户身份（简化版，生产环境建议使用 JWT）
+- 注册/登录接口返回用户信息（不含密码），前端保存用户 ID 并在后续请求中携带
+
+**API 分组**：
+- `/api/auth/*`：认证相关（注册、登录）
+- `/api/subscriptions/*`：订阅管理（CRUD）
+- `/api/morning-report/*`：学术日报
+- `/api/literature-review`：文献综述
+- `/api/literature-search`：文献检索
+- `/api/translate-paper`：文献翻译
+
+**数据转换**：
+- Application Service 负责将底层服务的响应格式转换为前端期望的格式
+- 例如：Nexus 的 `MORNING_REPORT` 报告格式 → 前端期望的 `search_results` 格式
+
+### 6.5 与下游服务的交互
+
+**Nexus Orchestration Service**：
+- 学术日报：`POST /api/v1/jobs`（`task_type: "MORNING_REPORT"`）→ 轮询 `GET /api/v1/jobs/{trace_id}` → `GET /api/v1/jobs/{trace_id}/report`
+- 文献综述：`POST /api/v1/jobs`（`task_type: "SUMMARY_REPORT"`）→ 等待完成 → `GET /api/v1/jobs/{trace_id}/report`
+
+**Indexing Service**：
+- 文献检索：`POST /search`（透传参数，转换响应格式）
+
+**Translator Service**：
+- 文献翻译：`POST /api/v1/translate/image`（multipart/form-data，文件上传）
+
+### 6.6 配置与环境变量
+
+**关键配置**（`config.py`）：
+- `API_BASE_URL`：Nexus Orchestration Service 的 API 前缀（如 `"http://localhost:8000/api/v1"`）
+- `BASE_HOST`：Nexus Orchestration Service 的基础 URL（如 `"http://localhost:8000"`）
+- `INDEXING_SERVICE_BASE_URL`：Indexing Service 的基础 URL（如 `"http://localhost:8020"`）
+- `TRANSLATOR_SERVICE_BASE_URL`：Translator Service 的基础 URL（如 `"http://localhost:8002"`）
+- `DATABASE_URL`：PostgreSQL 连接字符串
+
+---
+
+## 7) Frontend（前端应用）
+
+### 7.1 职责与定位
+
+Frontend 是面向用户的 Web 应用，提供：
+- **用户界面**：登录、首页、学术日报、文献综述、文献翻译、文献检索等功能页面
+- **状态管理**：用户认证状态、订阅数据、搜索结果等
+- **API 调用**：通过 HTTP 请求调用 Application Service 的 API
+
+### 7.2 技术架构
+
+**技术栈**：
+- **框架**：Vue 3（Composition API）
+- **路由**：Vue Router
+- **构建工具**：Vite
+- **HTTP 客户端**：`fetch` API（通过 composables 封装）
+
+**目录结构**（`frontend/`）：
+```
+frontend/
+├── index.html           # HTML 入口
+├── package.json         # 依赖管理
+├── vite.config.js       # Vite 配置
+├── src/
+│   ├── main.js          # 应用入口
+│   ├── App.vue          # 根组件（布局、侧边栏、路由视图）
+│   ├── config.js        # 配置（API_BASE_URL, MINIO_UPLOAD_URL）
+│   ├── style.css        # 全局样式
+│   ├── router/
+│   │   └── index.js     # 路由配置
+│   ├── composables/     # 组合式函数
+│   │   ├── useAuth.js           # 认证状态管理
+│   │   └── useSubscriptions.js  # 订阅数据管理
+│   └── views/           # 页面组件
+│       ├── Login.vue                    # 登录页
+│       ├── Home.vue                     # 首页
+│       ├── DailySubscription/           # 学术日报
+│       │   ├── Settings.vue            # 订阅设置
+│       │   └── Updates.vue             # 日报更新
+│       ├── LiteratureReview/           # 文献综述
+│       │   └── Settings.vue            # 综述设置
+│       ├── LiteratureTranslation/      # 文献翻译
+│       │   └── Settings.vue            # 翻译设置
+│       └── LiteratureSearch/           # 文献检索
+│           └── Settings.vue            # 检索设置
+```
+
+### 7.3 路由设计
+
+**路由列表**（`router/index.js`）：
+- `/login`：登录页（`requiresAuth: false`）
+- `/`：首页（`requiresAuth: true`）
+- `/daily-subscription`：学术日报（重定向到 `/daily-subscription/updates`）
+  - `/daily-subscription/updates`：日报更新页面
+- `/literature-review`：文献综述
+- `/literature-translation`：文献翻译
+- `/literature-search`：文献检索
+
+**路由守卫**：
+- 所有需要认证的路由（`meta.requiresAuth: true`）会检查用户登录状态
+- 未登录用户会被重定向到 `/login`，并保存原始路径以便登录后跳转
+
+### 7.4 状态管理
+
+**useAuth（认证状态）**：
+- `user`：当前用户信息（从 localStorage 读取）
+- `checkAuth()`：检查是否已登录
+- `login()`：登录（调用 `/api/auth/login`，保存用户信息）
+- `logout()`：登出（清除用户信息）
+
+**useSubscriptions（订阅数据）**：
+- `subscriptions`：订阅列表
+- `loadSubscriptions()`：加载订阅（调用 `/api/subscriptions`）
+- `createSubscription()`：创建订阅
+- `updateSubscription()`：更新订阅
+- `deleteSubscription()`：删除订阅
+
+### 7.5 UI 布局
+
+**App.vue 布局结构**：
+- **主侧边栏**（左侧，可折叠）：
+  - Logo 与品牌名称
+  - 导航菜单（首页、学术日报、文献综述、文献翻译、文献检索）
+  - 用户信息与退出登录
+- **二级侧边栏**（左侧第二个，条件显示）：
+  - 学术日报页面：订阅设置侧栏
+  - 文献综述页面：综述设置侧栏
+  - 文献翻译页面：翻译设置侧栏
+  - 文献检索页面：检索设置侧栏
+- **主内容区**（右侧）：
+  - `<router-view>`：显示当前路由对应的页面组件
+  - 使用 `<keep-alive>` 缓存页面状态
+
+**响应式设计**：
+- 桌面端（>1024px）：侧边栏固定显示，可折叠
+- 移动端（≤1024px）：侧边栏隐藏，通过菜单按钮打开
+
+### 7.6 API 调用
+
+**配置**（`config.js`）：
+- `API_BASE_URL`：Application Service 的基础 URL（从环境变量 `VITE_API_BASE_URL` 读取）
+- `MINIO_UPLOAD_URL`：MinIO 上传服务器 URL（从环境变量 `VITE_MINIO_UPLOAD_URL` 读取）
+
+**请求头**：
+- 所有需要认证的请求都会在请求头中添加 `X-User-ID`（从 `useAuth` 获取）
+
+**错误处理**：
+- HTTP 错误响应会在组件中显示错误提示
+- 401 Unauthorized 会触发登出并跳转到登录页
+
+### 7.7 数据流
+
+**典型流程（以学术日报为例）**：
+1. 用户在设置侧栏配置查询参数（query、limit、filters）
+2. 点击"生成日报"按钮
+3. 前端调用 `POST /api/morning-report`，获取 `trace_id`
+4. 前端轮询 `GET /api/morning-report/{trace_id}` 直到任务完成
+5. 显示结果（论文列表与摘要）
+
+**文件上传流程（文献翻译）**：
+1. 用户选择 PDF 文件
+2. 前端先上传文件到 MinIO（获取 presigned URL）
+3. 前端调用 `POST /api/translate-paper`，传递文件与目标语言
+4. 显示翻译结果
+
+---
+
+## 8) 整体架构图
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Frontend (Vue 3)                      │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
+│  │   Login  │  │   Home   │  │  Daily   │  │Literature│    │
+│  │          │  │          │  │Subscription│ │ Review   │    │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘    │
+└───────────────────────────┬─────────────────────────────────┘
+                             │ HTTP (REST API)
+                             │ X-User-ID Header
+┌─────────────────────────────▼─────────────────────────────────┐
+│              Application Service (FastAPI)                     │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │ Auth Router  │  │ Subscriptions│  │ Morning Report│      │
+│  │              │  │    Router    │  │    Router    │      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │Literature    │  │Literature    │  │Literature    │      │
+│  │Review Router │  │Search Router │  │Translation   │      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+│                                                                 │
+│  PostgreSQL (User, Subscriptions)                             │
+└───────────┬──────────────┬──────────────┬────────────────────┘
+             │              │              │
+    ┌────────▼────┐  ┌──────▼──────┐  ┌──▼──────────┐
+    │   Nexus     │  │  Indexing   │  │ Translator  │
+    │Orchestration│  │   Service   │  │  Service    │
+    │  Service    │  │             │  │             │
+    └─────────────┘  └──────────────┘  └──────────────┘
+             │              │              │
+             └──────────────┴──────────────┘
+                           │
+                    ┌──────▼──────┐
+                    │  RabbitMQ   │
+                    │  (Commands  │
+                    │   & Events) │
+                    └─────────────┘
+```
+
+**说明**：
+- Frontend 通过 HTTP 调用 Application Service
+- Application Service 作为应用层，代理请求到底层微服务（Nexus、Indexing、Translator）
+- Nexus Orchestration Service 通过 RabbitMQ 协调各工具服务（discovery、downloader、parser、indexer、overview）
+- Application Service 使用 PostgreSQL 存储用户数据与订阅数据
 
 

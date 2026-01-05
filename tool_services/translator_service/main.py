@@ -3,13 +3,16 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
+import shutil
 import sys
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 from redis.asyncio import Redis
@@ -28,6 +31,8 @@ from nexus_tool import config
 from tool_services.translator_service import prompt_config
 from unified_backend.router import router as unified_router
 from unified_backend.core.image_translate import translate_image_bytes as baidu_translate_image_bytes
+from unified_backend.core.pipeline import translate_pdf_to_markdown
+from unified_backend.config import settings as unified_settings
 
 app = FastAPI(
     title="Translator Service",
@@ -167,6 +172,11 @@ async def _set_cached_translation(cache_key: str, resp: TranslateResponse) -> No
 class PromptUpdateRequest(BaseModel):
     template: str = Field(..., min_length=1, description="Template for the system prompt")
     description: Optional[str] = Field(None, description="Optional explanation of the prompt's intent")
+
+
+class TranslatePaperResponse(BaseModel):
+    text_translated: str = Field(..., description="提取并翻译后的完整论文文本")
+    meta: Dict[str, Any] = Field(..., description="元数据信息")
 
 def _to_image_part(image_ref: str) -> Dict[str, Any]:
     ref = (image_ref or "").strip()
@@ -633,6 +643,94 @@ async def update_glossary(term: str, req: GlossaryUpdateRequest):
     if not row:
         raise HTTPException(status_code=404, detail=f"term {normalized_term} not found")
     return GlossaryTermResponse.model_validate(_glossary_row_to_payload(row))
+
+
+@app.post("/translate-paper", response_model=TranslatePaperResponse)
+async def translate_paper(
+    file: UploadFile = File(...),
+    target_lang: str = Form("zh")
+):
+    """
+    论文翻译接口 - 符合 API_REFERENCE.md 中的接口声明
+    
+    上传 PDF 文件并返回翻译后的文本
+    """
+    # 验证文件类型
+    if not file.filename or not file.filename.lower().endswith('.pdf'):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "only PDF files are supported"}
+        )
+    
+    # 确保临时目录存在
+    os.makedirs(unified_settings.TMP_DIR, exist_ok=True)
+    
+    pdf_path = None
+    try:
+        # 保存上传的 PDF 文件
+        pdf_id = str(uuid.uuid4())
+        pdf_path = os.path.join(unified_settings.TMP_DIR, f"{pdf_id}.pdf")
+        with open(pdf_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+        
+        # 执行 PDF 翻译（默认源语言为英文）
+        # 注意：translate_pdf_to_markdown 返回的是 markdown 格式，我们需要提取纯文本
+        markdown_result = translate_pdf_to_markdown(
+            pdf_path,
+            source_lang="en",  # 默认源语言为英文
+            target_lang=target_lang
+        )
+        
+        # 将 markdown 转换为纯文本（移除 markdown 格式标记）
+        # 简单处理：移除图片引用和公式标记，保留文本内容
+        # 移除图片引用 ![Image...](...)
+        text_translated = re.sub(r'!\[.*?\]\(.*?\)', '', markdown_result)
+        # 移除 LaTeX 公式标记 $$...$$ 和 $...$
+        text_translated = re.sub(r'\$\$.*?\$\$', '', text_translated, flags=re.DOTALL)
+        text_translated = re.sub(r'\$.*?\$', '', text_translated)
+        # 清理多余空白
+        text_translated = re.sub(r'\n\s*\n', '\n\n', text_translated).strip()
+        
+        # 如果处理后为空，使用原始 markdown
+        if not text_translated:
+            text_translated = markdown_result
+        
+        # 获取模型标识
+        model_used = config.DEFAULT_MODEL or unified_settings.SILICONFLOW_MODEL or "deepseek-ai/DeepSeek-V3"
+        
+        # 提取文件名（不含路径）
+        file_name = file.filename or "paper.pdf"
+        if '/' in file_name:
+            file_name = os.path.basename(file_name)
+        
+        return TranslatePaperResponse(
+            text_translated=text_translated,
+            meta={
+                "target_lang": target_lang,
+                "file_name": file_name,
+                "model": model_used
+            }
+        )
+        
+    except Exception as e:
+        error_msg = str(e)
+        # 检查是否是 PDF 解析错误
+        if "PDF parsing failed" in error_msg or "parse" in error_msg.lower():
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"PDF parsing failed: {error_msg}"}
+            )
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Translation failed: {error_msg}"}
+        )
+    finally:
+        # 清理临时文件
+        if pdf_path and os.path.exists(pdf_path):
+            try:
+                os.remove(pdf_path)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     import uvicorn

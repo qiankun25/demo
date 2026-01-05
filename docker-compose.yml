@@ -7,6 +7,9 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=WFWwfw123...
     healthcheck:
       test: ["CMD", "rabbitmqctl", "status"]
       interval: 10s
@@ -34,8 +37,9 @@ services:
     image: redis:7
     ports:
       - "6379:6379"
+    command: redis-server --requirepass WFWwfw123...
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "WFWwfw123...", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -45,7 +49,7 @@ services:
     environment:
       POSTGRES_DB: downloads
       POSTGRES_USER: user
-      POSTGRES_PASSWORD: pass
+      POSTGRES_PASSWORD: WFWwfw123...
     ports:
       - "5432:5432"
     volumes:
@@ -61,7 +65,7 @@ services:
     environment:
       POSTGRES_DB: discovery
       POSTGRES_USER: discovery_user
-      POSTGRES_PASSWORD: discovery_pass
+      POSTGRES_PASSWORD: WFWwfw123...
     ports:
       - "5434:5432"
     volumes:
@@ -77,7 +81,7 @@ services:
     environment:
       POSTGRES_DB: parser
       POSTGRES_USER: parser_user
-      POSTGRES_PASSWORD: parser_pass
+      POSTGRES_PASSWORD: WFWwfw123...
     ports:
       - "5435:5432"
     volumes:
@@ -93,7 +97,7 @@ services:
     environment:
       POSTGRES_DB: indexing
       POSTGRES_USER: index_user
-      POSTGRES_PASSWORD: index_pass
+      POSTGRES_PASSWORD: WFWwfw123...
     ports:
       - "5436:5432"
     volumes:
@@ -112,7 +116,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://guest:WFWwfw123...@rabbitmq:5672/
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
@@ -132,12 +136,12 @@ services:
       dockerfile: tool_services/discovery_service/Dockerfile
     environment:
       - SERVICE_MODE=worker
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://guest:WFWwfw123...@rabbitmq:5672/
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=papers
-      - DISCOVERY_DATABASE_URL=postgresql://discovery_user:discovery_pass@discovery_db:5432/discovery
+      - DISCOVERY_DATABASE_URL=postgresql://discovery_user:WFWwfw123...@discovery_db:5432/discovery
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -152,7 +156,7 @@ services:
       context: .
       dockerfile: tool_services/discovery_service/Dockerfile
     environment:
-      - DISCOVERY_DATABASE_URL=postgresql://discovery_user:discovery_pass@discovery_db:5432/discovery
+      - DISCOVERY_DATABASE_URL=postgresql://discovery_user:WFWwfw123...@discovery_db:5432/discovery
     depends_on:
       discovery_db:
         condition: service_healthy
@@ -166,10 +170,10 @@ services:
     ports:
       - "8001:8000"
     environment:
-      - DATABASE_URL=postgresql://user:pass@db:5432/downloads
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DATABASE_URL=postgresql://user:WFWwfw123...@db:5432/downloads
+      - REDIS_URL=redis://:WFWwfw123...@redis:6379/0
+      - CELERY_BROKER_URL=redis://:WFWwfw123...@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:WFWwfw123...@redis:6379/1
       - MINIO_ENDPOINT=minio:9000
       - MINIO_EXTERNAL_ENDPOINT=localhost:9000
       - MINIO_ACCESS_KEY=minioadmin
@@ -190,10 +194,10 @@ services:
       dockerfile: Dockerfile
     command: celery -A app.celery_app worker --loglevel=info
     environment:
-      - DATABASE_URL=postgresql://user:pass@db:5432/downloads
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DATABASE_URL=postgresql://user:WFWwfw123...@db:5432/downloads
+      - REDIS_URL=redis://:WFWwfw123...@redis:6379/0
+      - CELERY_BROKER_URL=redis://:WFWwfw123...@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:WFWwfw123...@redis:6379/1
       - MINIO_ENDPOINT=minio:9000
       - MINIO_EXTERNAL_ENDPOINT=localhost:9000
       - MINIO_ACCESS_KEY=minioadmin
@@ -215,9 +219,9 @@ services:
       dockerfile: Dockerfile
     command: python -m app.mq_worker
     environment:
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - DATABASE_URL=postgresql://user:pass@db:5432/downloads
-      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://guest:WFWwfw123...@rabbitmq:5672/
+      - DATABASE_URL=postgresql://user:WFWwfw123...@db:5432/downloads
+      - REDIS_URL=redis://:WFWwfw123...@redis:6379/0
       - MINIO_ENDPOINT=minio:9000
       - MINIO_EXTERNAL_ENDPOINT=localhost:9000
       - MINIO_ACCESS_KEY=minioadmin
@@ -239,7 +243,7 @@ services:
       context: .
       dockerfile: tool_services/parser_service/Dockerfile
     environment:
-      - PARSER_DATABASE_URL=postgresql://parser_user:parser_pass@parser_db:5432/parser
+      - PARSER_DATABASE_URL=postgresql://parser_user:WFWwfw123...@parser_db:5432/parser
     depends_on:
       parser_db:
         condition: service_healthy
@@ -253,8 +257,8 @@ services:
       - "8031:8031"
     environment:
       - SERVICE_MODE=api
-      - PARSER_DATABASE_URL=postgresql://parser_user:parser_pass@parser_db:5432/parser
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - PARSER_DATABASE_URL=postgresql://parser_user:WFWwfw123...@parser_db:5432/parser
+      - RABBITMQ_URL=amqp://guest:WFWwfw123...@rabbitmq:5672/
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
@@ -278,8 +282,8 @@ services:
       dockerfile: tool_services/parser_service/Dockerfile
     environment:
       - SERVICE_MODE=worker
-      - PARSER_DATABASE_URL=postgresql://parser_user:parser_pass@parser_db:5432/parser
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - PARSER_DATABASE_URL=postgresql://parser_user:WFWwfw123...@parser_db:5432/parser
+      - RABBITMQ_URL=amqp://guest:WFWwfw123...@rabbitmq:5672/
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
@@ -305,7 +309,7 @@ services:
       context: .
       dockerfile: tool_services/indexing_service/Dockerfile
     environment:
-      - INDEX_DATABASE_URL=postgresql://index_user:index_pass@indexing_db:5432/indexing
+      - INDEX_DATABASE_URL=postgresql://index_user:WFWwfw123...@indexing_db:5432/indexing
     depends_on:
       indexing_db:
         condition: service_healthy
@@ -318,8 +322,8 @@ services:
     ports:
       - "8020:8020"
     environment:
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - INDEX_DATABASE_URL=postgresql://index_user:index_pass@indexing_db:5432/indexing
+      - RABBITMQ_URL=amqp://guest:WFWwfw123...@rabbitmq:5672/
+      - INDEX_DATABASE_URL=postgresql://index_user:WFWwfw123...@indexing_db:5432/indexing
       - INDEX_CHROMA_PERSIST_DIR=/app/.chroma
       - INDEX_CHROMA_COLLECTION=paper_chunks
       - INDEX_CHROMA_DISTANCE=cosine
@@ -343,8 +347,8 @@ services:
       dockerfile: tool_services/indexing_service/Dockerfile
     environment:
       - SERVICE_MODE=worker
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - INDEX_DATABASE_URL=postgresql://index_user:index_pass@indexing_db:5432/indexing
+      - RABBITMQ_URL=amqp://guest:WFWwfw123...@rabbitmq:5672/
+      - INDEX_DATABASE_URL=postgresql://index_user:WFWwfw123...@indexing_db:5432/indexing
       - INDEX_CHROMA_PERSIST_DIR=/app/.chroma
       - INDEX_CHROMA_COLLECTION=paper_chunks
       - INDEX_CHROMA_DISTANCE=cosine
@@ -372,7 +376,7 @@ services:
       - "8040:8040"
     environment:
       - SERVICE_MODE=api
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://guest:WFWwfw123...@rabbitmq:5672/
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
@@ -395,7 +399,7 @@ services:
       dockerfile: tool_services/overview_service/Dockerfile
     environment:
       - SERVICE_MODE=worker
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://guest:WFWwfw123...@rabbitmq:5672/
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
@@ -417,7 +421,7 @@ services:
     ports:
       - "8003:8003"
     environment:
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://guest:WFWwfw123...@rabbitmq:5672/
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
@@ -435,7 +439,7 @@ services:
     ports:
       - "8002:8002"
     environment:
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://guest:WFWwfw123...@rabbitmq:5672/
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
@@ -446,6 +450,89 @@ services:
       minio:
         condition: service_healthy
 
+  # --- Application Service (FastAPI Backend) ---
+  mysql_db:
+    image: mysql:8.0
+    container_name: application_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-WFWwfw123...}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wfw_db}
+      MYSQL_USER: ${MYSQL_USER:-app_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-WFWwfw123...}
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+
+  application_service:
+    build:
+      context: .
+      dockerfile: application_service/Dockerfile
+    container_name: application_service
+    ports:
+      - "${APPLICATION_SERVICE_PORT:-8005}:8000"
+    environment:
+      # 数据库配置（默认使用外部 MySQL 服务器 101.132.102.157）
+      # 如果使用容器化的 MySQL，设置 DB_HOST=mysql_db
+      DATABASE_URL: ${APPLICATION_DATABASE_URL:-mysql+pymysql://${MYSQL_USER:-app_user}:${MYSQL_PASSWORD:-WFWwfw123...}@${DB_HOST:-101.132.102.157}:${DB_PORT:-3306}/${MYSQL_DATABASE:-wfw_db}?charset=utf8mb4}
+      DB_HOST: ${DB_HOST:-101.132.102.157}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_USER: ${MYSQL_USER:-app_user}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-WFWwfw123...}
+      DB_NAME: ${MYSQL_DATABASE:-wfw_db}
+      # 服务 URL 配置（使用 Docker 内部网络）
+      API_BASE_URL: ${APPLICATION_API_BASE_URL:-http://application_service:8000/api/v1}
+      BASE_HOST: ${APPLICATION_BASE_HOST:-http://application_service:8000}
+      TRANSLATOR_SERVICE_BASE_URL: ${TRANSLATOR_SERVICE_BASE_URL:-http://translator_service:8002}
+      INDEXING_SERVICE_BASE_URL: ${INDEXING_SERVICE_BASE_URL:-http://indexing_service_api:8020}
+      MINIO_UPLOAD_URL: ${MINIO_UPLOAD_URL:-http://download_service_api:8000/upload}
+    volumes:
+      - application_uploads:/app/uploads
+    depends_on:
+      translator_service:
+        condition: service_started
+      indexing_service_api:
+        condition: service_started
+      download_service_api:
+        condition: service_started
+    # 注意: MySQL 部署在外部服务器 (101.132.102.157)，不在 Docker 容器中
+    # 如果使用容器化的 MySQL，可以取消下面的注释并添加 mysql_db 依赖
+    # mysql_db:
+    #   condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+  # --- Frontend (Vue + Nginx) ---
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8005/api/v1}
+        VITE_MINIO_UPLOAD_URL: ${VITE_MINIO_UPLOAD_URL:-http://localhost:8001/upload}
+    container_name: frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      application_service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
 volumes:
   minio_data:
   postgres_data:
@@ -453,3 +540,5 @@ volumes:
   parser_postgres_data:
   indexing_postgres_data:
   indexing_chroma_data:
+  mysql_data:
+  application_uploads:

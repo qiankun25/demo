@@ -311,76 +311,12 @@ Event 是 tool service → Nexus 的“响应”。同样使用 `MessagePackage(
 
 ### 4.1 MORNING_REPORT：discovery → downloader(fan-out) → parser → indexer
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant Client as Client/API
-  participant Nexus as Nexus Orchestrator
-  participant MQ as RabbitMQ
-  participant DiscW as discovery_service(worker)
-  participant DiscAPI as discovery_service(api)
-  participant DL as download_service(mq_worker)
-  participant DLAPI as download_service(api)
-  participant Parser as parser_service(worker)
-  participant ParserAPI as parser_service(api)
-  participant Indexer as indexing_service(worker)
-
-  Client->>Nexus: submit_job(MORNING_REPORT, params)
-  Nexus->>MQ: cmd.discovery.start (trace_id)
-  MQ-->>DiscW: deliver cmd.discovery.start
-  DiscW->>MQ: evt.discovery.finished (result_ref.search_result)
-  MQ-->>Nexus: deliver evt.discovery.finished
-  Nexus->>DiscAPI: GET /v1/results/{result_id}/min_fields
-  loop for each work_key
-    Nexus->>MQ: cmd.downloader.start (task_id=work_key, input_ref.fetch.url)
-  end
-  MQ-->>DL: deliver cmd.downloader.start
-  DL->>DLAPI: (internal) create file + upload to MinIO
-  DL->>MQ: evt.downloader.finished (result_ref.file, work_key)
-  MQ-->>Nexus: deliver evt.downloader.finished
-  Nexus->>MQ: cmd.parser.start (task_id=work_key, input_ref=file_ref)
-  MQ-->>Parser: deliver cmd.parser.start
-  Parser->>DLAPI: GET signed_url(file_id)
-  Parser->>MQ: evt.parser.finished (result_ref.parsed_doc, work_key)
-  MQ-->>Nexus: deliver evt.parser.finished
-  Nexus->>MQ: cmd.indexer.start (task_id=work_key, input_ref=parsed_doc_ref)
-  MQ-->>Indexer: deliver cmd.indexer.start
-  Indexer->>ParserAPI: GET /v1/parsed/{doc_id}
-  Indexer->>MQ: evt.indexer.finished (result_ref.index_record, work_key)
-  MQ-->>Nexus: deliver evt.indexer.finished
-  Nexus-->>Client: job completed (state updated)
-```
-
+![MORNING_REPORT](./学术早报BPMN.png)
 ### 4.2 SUMMARY_REPORT：提交时 fan-out downloader → parser → fan-in overview
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant Client as Client/API
-  participant Nexus as Nexus Orchestrator
-  participant MQ as RabbitMQ
-  participant DL as download_service(mq_worker)
-  participant Parser as parser_service(worker)
-  participant Ovr as overview_service(worker)
+![SUMMARY_REPORT](./综述报告BPMN.png)
 
-  Client->>Nexus: submit_job(SUMMARY_REPORT, papers[])
-  loop for each paper
-    Nexus->>MQ: cmd.downloader.start (task_id=work_key, input_ref.fetch.url)
-  end
-  MQ-->>DL: deliver cmd.downloader.start
-  DL->>MQ: evt.downloader.finished (result_ref.file, work_key)
-  MQ-->>Nexus: deliver evt.downloader.finished
-  Nexus->>MQ: cmd.parser.start (input_ref=file_ref, task_id=work_key)
-  MQ-->>Parser: deliver cmd.parser.start
-  Parser->>MQ: evt.parser.finished (result_ref.parsed_doc, work_key)
-  MQ-->>Nexus: deliver evt.parser.finished
-  Note over Nexus: fan-in 条件满足（所有 work_key 完成/允许部分失败）<br/>Nexus 会通过 parser Query API 抽取 chunk[0].text 作为 lightweight summary
-  Nexus->>MQ: cmd.overview.start (params: summaries)
-  MQ-->>Ovr: deliver cmd.overview.start
-  Ovr->>MQ: evt.overview.finished (result_ref.overview_report)
-  MQ-->>Nexus: deliver evt.overview.finished
-  Nexus-->>Client: job completed (report_ref ready)
-```
+
 
 ---
 

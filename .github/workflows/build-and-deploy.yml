@@ -1,0 +1,335 @@
+name: Build and Deploy to Production
+
+on:
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '部署版本号（如：v1.0.0）'
+        required: false
+        default: ''
+      skip_deploy:
+        description: '仅构建，不部署'
+        required: false
+        default: false
+        type: boolean
+  
+  # 推送到 main 或 master 分支时触发
+  push:
+    branches:
+      - main
+      - master
+  
+  # 创建 release tag 时触发
+  push:
+    tags:
+      - 'v*'
+
+env:
+  # 服务器配置（从 GitHub Secrets 读取）
+  SERVER_IP: ${{ secrets.SERVER_IP }}
+  SERVER_USER: ${{ secrets.SERVER_USER }}
+  REMOTE_PATH: ${{ secrets.REMOTE_PATH || '~/myapp' }}
+  
+  # 前端构建环境变量（从 GitHub Secrets 读取）
+  VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+  VITE_MINIO_UPLOAD_URL: ${{ secrets.VITE_MINIO_UPLOAD_URL }}
+
+jobs:
+  build:
+    name: 构建 Docker 镜像
+    runs-on: ubuntu-latest
+    
+    outputs:
+      version: ${{ steps.set-version.outputs.version }}
+      package-name: ${{ steps.set-version.outputs.package-name }}
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      
+      - name: 设置版本号
+        id: set-version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [ -n "${{ github.ref }}" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="$(date +%Y%m%d_%H%M%S)_${GITHUB_SHA::8}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "package-name=deployment-package-$VERSION.tar.gz" >> $GITHUB_OUTPUT
+          echo "构建版本: $VERSION"
+      
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: 构建 Nexus 镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./nexus/Dockerfile
+          tags: nexus:${{ steps.set-version.outputs.version }},nexus:latest
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: 构建 Discovery Service 镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./tool_services/discovery_service/Dockerfile
+          tags: discovery_service:${{ steps.set-version.outputs.version }},discovery_service:latest
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: 构建 Download Service 镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: ./tool_services/download_service
+          file: ./tool_services/download_service/Dockerfile
+          tags: download_service:${{ steps.set-version.outputs.version }},download_service:latest
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: 构建 Parser Service 镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./tool_services/parser_service/Dockerfile
+          tags: parser_service:${{ steps.set-version.outputs.version }},parser_service:latest
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: 构建 Indexing Service 镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./tool_services/indexing_service/Dockerfile
+          tags: indexing_service:${{ steps.set-version.outputs.version }},indexing_service:latest
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: 构建 Overview Service 镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./tool_services/overview_service/Dockerfile
+          tags: overview_service:${{ steps.set-version.outputs.version }},overview_service:latest
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: 构建 Retrieval Service 镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./tool_services/retrieval_service/Dockerfile
+          tags: retrieval_service:${{ steps.set-version.outputs.version }},retrieval_service:latest
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: 构建 Translator Service 镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./tool_services/translator_service/Dockerfile
+          tags: translator_service:${{ steps.set-version.outputs.version }},translator_service:latest
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: 构建 Application Service 镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./application_service/Dockerfile
+          tags: application_service:${{ steps.set-version.outputs.version }},application_service:latest
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: 构建 Frontend 镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./frontend/Dockerfile
+          tags: frontend:${{ steps.set-version.outputs.version }},frontend:latest
+          push: false
+          load: true
+          build-args: |
+            VITE_API_BASE_URL=${{ env.VITE_API_BASE_URL }}
+            VITE_MINIO_UPLOAD_URL=${{ env.VITE_MINIO_UPLOAD_URL }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: 创建构建目录
+        run: |
+          mkdir -p build/images
+          mkdir -p build/config
+      
+      - name: 保存镜像为 tar 文件
+        run: |
+          docker save nexus:${{ steps.set-version.outputs.version }} | gzip > build/images/nexus_${{ steps.set-version.outputs.version }}.tar.gz
+          docker save discovery_service:${{ steps.set-version.outputs.version }} | gzip > build/images/discovery_service_${{ steps.set-version.outputs.version }}.tar.gz
+          docker save download_service:${{ steps.set-version.outputs.version }} | gzip > build/images/download_service_${{ steps.set-version.outputs.version }}.tar.gz
+          docker save parser_service:${{ steps.set-version.outputs.version }} | gzip > build/images/parser_service_${{ steps.set-version.outputs.version }}.tar.gz
+          docker save indexing_service:${{ steps.set-version.outputs.version }} | gzip > build/images/indexing_service_${{ steps.set-version.outputs.version }}.tar.gz
+          docker save overview_service:${{ steps.set-version.outputs.version }} | gzip > build/images/overview_service_${{ steps.set-version.outputs.version }}.tar.gz
+          docker save retrieval_service:${{ steps.set-version.outputs.version }} | gzip > build/images/retrieval_service_${{ steps.set-version.outputs.version }}.tar.gz
+          docker save translator_service:${{ steps.set-version.outputs.version }} | gzip > build/images/translator_service_${{ steps.set-version.outputs.version }}.tar.gz
+          docker save application_service:${{ steps.set-version.outputs.version }} | gzip > build/images/application_service_${{ steps.set-version.outputs.version }}.tar.gz
+          docker save frontend:${{ steps.set-version.outputs.version }} | gzip > build/images/frontend_${{ steps.set-version.outputs.version }}.tar.gz
+      
+      - name: 复制配置文件
+        run: |
+          cp docker-compose.yml build/config/
+          cp env.prod.example build/config/
+          cp scripts/server-deploy.sh build/config/
+          chmod +x build/config/server-deploy.sh
+      
+      - name: 创建版本信息
+        run: |
+          cat > build/VERSION << EOF
+          版本: ${{ steps.set-version.outputs.version }}
+          构建时间: $(date '+%Y-%m-%d %H:%M:%S')
+          Git 提交: ${{ github.sha }}
+          Git 分支: ${{ github.ref_name }}
+          GitHub Actions 运行 ID: ${{ github.run_id }}
+          EOF
+      
+      - name: 创建服务清单
+        run: |
+          cat > build/MANIFEST << EOF
+          # 部署包清单
+          版本: ${{ steps.set-version.outputs.version }}
+          构建时间: $(date '+%Y-%m-%d %H:%M:%S')
+          Git 提交: ${{ github.sha }}
+          
+          ## 镜像列表
+          - nexus: nexus_${{ steps.set-version.outputs.version }}.tar.gz
+          - discovery_service: discovery_service_${{ steps.set-version.outputs.version }}.tar.gz
+          - download_service: download_service_${{ steps.set-version.outputs.version }}.tar.gz
+          - parser_service: parser_service_${{ steps.set-version.outputs.version }}.tar.gz
+          - indexing_service: indexing_service_${{ steps.set-version.outputs.version }}.tar.gz
+          - overview_service: overview_service_${{ steps.set-version.outputs.version }}.tar.gz
+          - retrieval_service: retrieval_service_${{ steps.set-version.outputs.version }}.tar.gz
+          - translator_service: translator_service_${{ steps.set-version.outputs.version }}.tar.gz
+          - application_service: application_service_${{ steps.set-version.outputs.version }}.tar.gz
+          - frontend: frontend_${{ steps.set-version.outputs.version }}.tar.gz
+          
+          ## 配置文件
+          - docker-compose.yml
+          - env.prod.example
+          - server-deploy.sh
+          EOF
+      
+      - name: 打包部署包
+        run: |
+          cd build
+          tar -czf ../${{ steps.set-version.outputs.package-name }} images/ config/ VERSION MANIFEST
+          cd ..
+          ls -lh ${{ steps.set-version.outputs.package-name }}
+      
+      - name: 上传部署包为 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-package
+          path: ${{ steps.set-version.outputs.package-name }}
+          retention-days: 30
+
+  deploy:
+    name: 部署到生产服务器
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event.inputs.skip_deploy != 'true'
+    
+    steps:
+      - name: 下载部署包
+        uses: actions/download-artifact@v4
+        with:
+          name: deployment-package
+      
+      - name: 配置 SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ env.SERVER_IP }} >> ~/.ssh/known_hosts
+      
+      - name: 测试服务器连接
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} "echo '服务器连接成功'"
+      
+      - name: 在服务器上创建目录
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'EOF'
+            mkdir -p ${{ env.REMOTE_PATH }}
+            mkdir -p ${{ env.REMOTE_PATH }}/images
+            mkdir -p ${{ env.REMOTE_PATH }}/config
+            mkdir -p ${{ env.REMOTE_PATH }}/backups
+          EOF
+      
+      - name: 上传部署包
+        run: |
+          DEPLOYMENT_PACKAGE=$(ls deployment-package-*.tar.gz | head -1)
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            "$DEPLOYMENT_PACKAGE" \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_IP }}:${{ env.REMOTE_PATH }}/
+      
+      - name: 在服务器上解压部署包
+        run: |
+          DEPLOYMENT_PACKAGE=$(ls deployment-package-*.tar.gz | head -1)
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << EOF
+            cd ${{ env.REMOTE_PATH }}
+            tar -xzf ${DEPLOYMENT_PACKAGE}
+            echo "部署包解压完成"
+          EOF
+      
+      - name: 上传环境变量文件（如果存在）
+        if: env.ENV_PROD != ''
+        run: |
+          echo "${{ secrets.ENV_PROD }}" > .env.prod
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            .env.prod \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_IP }}:${{ env.REMOTE_PATH }}/config/
+      
+      - name: 执行服务器端部署
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'EOF'
+            cd ${{ env.REMOTE_PATH }}
+            if [ ! -f "config/.env.prod" ]; then
+              echo "警告: 未找到 .env.prod 文件"
+              echo "请先创建配置文件:"
+              echo "  cp config/env.prod.example config/.env.prod"
+              echo "  nano config/.env.prod"
+              exit 1
+            fi
+            chmod +x config/server-deploy.sh
+            ./config/server-deploy.sh
+          EOF
+      
+      - name: 健康检查
+        run: |
+          sleep 30
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ env.SERVER_USER }}@${{ env.SERVER_IP }} << 'EOF'
+            echo "执行健康检查..."
+            curl -f http://localhost:8005/health && echo "✓ Application Service 健康" || echo "✗ Application Service 未就绪"
+            curl -f http://localhost:3000 > /dev/null && echo "✓ Frontend 健康" || echo "✗ Frontend 未就绪"
+          EOF
+
